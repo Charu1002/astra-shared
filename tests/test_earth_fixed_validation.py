@@ -1,7 +1,7 @@
 from astra_shared.earth_fixed_validation import (
     EARTH_FIXED_VALIDATION_REGISTRY,
     EarthFixedValidationError,
-    earth_fixed_validation_error_envelope,
+    request_validation_error_envelope,
     get_highest_cn_availability,
     validate_earth_fixed_request,
 )
@@ -28,14 +28,14 @@ def test_registry_contains_metadata_for_each_known_code():
 def test_validation_error_has_stable_codes_and_request_envelope():
     exc = EarthFixedValidationError(["invalid_pointing_mode", "invalid_pointing_mode"])
     assert exc.codes == ["invalid_pointing_mode"]
-    envelope = earth_fixed_validation_error_envelope(exc.codes)
-    assert envelope["error"] == "earth_fixed_validation_failed"
+    envelope = request_validation_error_envelope(exc.codes)
+    assert envelope["error"] == "request_validation_failed"
     assert envelope["errors"][0]["code"] == "invalid_pointing_mode"
     assert envelope["errors"][0]["category"] == "request"
 
 
 def test_unknown_validation_code_uses_safe_metadata_fallback():
-    detail = earth_fixed_validation_error_envelope(["unknown_code"])["errors"][0]
+    detail = request_validation_error_envelope(["unknown_code"])["errors"][0]
     assert detail["message"] == "Validation failed."
     assert detail["category"] == "internal"
 

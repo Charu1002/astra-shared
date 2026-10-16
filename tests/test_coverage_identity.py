@@ -25,3 +25,14 @@ def test_rf_identity_tracks_versioned_clutter_configuration():
     assert off != p50 != p90
     assert off["clutter_percentile"] is None
     assert "clutter_enable" not in p50
+
+
+def test_rf_identity_treats_null_min_elevation_deg_as_not_supplied():
+    from astra_shared.coverage_identity import build_earth_fixed_rf_identity_v1
+
+    legacy = build_earth_fixed_rf_identity_v1({"min_el_deg": 12.0})
+    null_canonical = build_earth_fixed_rf_identity_v1({"min_elevation_deg": None, "min_el_deg": 12.0})
+    canonical = build_earth_fixed_rf_identity_v1({"min_elevation_deg": 12.0})
+    assert legacy["min_elevation_deg"] == null_canonical["min_elevation_deg"] == canonical["min_elevation_deg"] == 12.0
+    both = build_earth_fixed_rf_identity_v1({"min_elevation_deg": 20.0, "min_el_deg": 12.0})
+    assert both["min_elevation_deg"] == 20.0

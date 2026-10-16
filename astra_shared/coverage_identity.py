@@ -74,12 +74,17 @@ def build_earth_fixed_rf_identity_v1(params: dict) -> dict:
     frequency_hz = p.get("frequency_hz")
     if frequency_hz is None:
         frequency_hz = p.get("freq_hz")
+    # First non-null alias, canonical first (plan Â§4.3 REV1-06): an explicit
+    # null min_elevation_deg is "not supplied", so a non-null min_el_deg wins.
+    min_elevation_deg = p.get("min_elevation_deg")
+    if min_elevation_deg is None:
+        min_elevation_deg = p.get("min_el_deg")
     return {
         "schema": "earth_fixed_rf_identity_v1",
         "pointing_mode": p.get("pointing_mode", "nadir"),
         "assignment_rule": p.get("assignment_rule", "highest_elevation"),
         "max_steer_deg": _num(p.get("max_steer_deg")),
-        "min_elevation_deg": _num(p.get("min_elevation_deg", p.get("min_el_deg"))),
+        "min_elevation_deg": _num(min_elevation_deg),
         "antenna_model": p.get("antenna_model"),
         "beamwidth_deg": _num(p.get("beamwidth_deg")),
         "max_gain_dbi": _num(p.get("max_gain_dbi")),
