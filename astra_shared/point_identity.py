@@ -13,10 +13,16 @@ def canonical_point_sat_id(
     for key in ("canonical_sat_id", "id", "catalog_id", "norad_id"):
         value = sat.get(key)
         if value not in (None, ""):
-            return _stable_text(value, field=key)
+            try:
+                return _stable_text(value, field=key)
+            except ValueError as exc:
+                raise ValueError("point_satellite_identity_invalid") from exc
     name = sat.get("name")
     if name not in (None, ""):
-        candidate = _stable_text(name, field="name")
+        try:
+            candidate = _stable_text(name, field="name")
+        except ValueError as exc:
+            raise ValueError("point_satellite_identity_invalid") from exc
         if legacy_unique_names is not None and candidate in legacy_unique_names:
             return candidate
     source_key = str(source).strip().lower()

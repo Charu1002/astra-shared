@@ -43,8 +43,43 @@ def test_pointing_aliases_are_canonical(value, expected):
 @pytest.mark.parametrize("key", ["max_steer_deg", "min_elevation_deg", "min_el_deg"])
 @pytest.mark.parametrize("value", ["bad", "nan", "inf", "-inf", -0.1, 90.1])
 def test_reachability_numbers_record_stable_errors(key, value):
-    parsed = parse_rf_params({key: value}, collect_errors=True)
+    parsed = parse_rf_params({"pointing_mode": "earth_fixed", "targets": [target()], key: value}, collect_errors=True)
     assert f"{key}_invalid" in parsed["rf_param_errors"] or f"{key}_out_of_range" in parsed["rf_param_errors"]
+
+
+@pytest.mark.parametrize("key", ["min_elevation_deg", "min_el_deg"])
+@pytest.mark.parametrize("value, expected", [(-5.0, 0.0), (95.0, 90.0), ("bad", 5.0), (30.0, 30.0)])
+def test_nadir_min_elevation_keeps_clamp_behavior(key, value, expected):
+    # Plan §4.5: a nadir request keeps its pre-earth-fixed behavior — an
+    # out-of-range minimum elevation is clamped (malformed -> default), never
+    # rejected, in both parser modes.
+    assert parse_rf_params({key: value})["min_elevation_deg"] == expected
+    parsed = parse_rf_params({key: value}, collect_errors=True)
+    assert parsed["min_elevation_deg"] == expected
+    assert parsed["rf_param_errors"] == []
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        {"assignment_rule": "bogus"},
+        {"max_steer_deg": 120},
+        {"targets_json": "not json"},
+        {"targets": [{"target_lat": 200, "target_lon": 0}]},
+        {"debug_target_reachability": True},
+    ],
+)
+def test_nadir_ignores_earth_fixed_only_inputs(extra):
+    # Earth-fixed-only fields are validated only when earth-fixed pointing is
+    # in use; a nadir request that carries them still runs as before.
+    parse_rf_params({"pointing_mode": "nadir", **extra})
+    assert parse_rf_params(extra, collect_errors=True)["rf_param_errors"] == []
+
+
+def test_invalid_pointing_mode_is_still_rejected():
+    with pytest.raises(RfParamParseError) as exc:
+        parse_rf_params({"pointing_mode": "sideways"})
+    assert exc.value.codes == ["invalid_pointing_mode"]
 
 
 @pytest.mark.parametrize("key,value", [("max_steer_deg", 0), ("max_steer_deg", 90), ("min_elevation_deg", 0), ("min_elevation_deg", 90)])
@@ -63,7 +98,9 @@ def test_targets_json_and_native_targets_canonicalize_identically():
 
 def test_conflicting_dual_target_sources_fail_closed():
     with pytest.raises(RfParamParseError) as exc:
-        parse_rf_params({"targets": [target(1, 2)], "targets_json": json.dumps([target(3, 4)])})
+        parse_rf_params(
+            {"pointing_mode": "earth_fixed", "targets": [target(1, 2)], "targets_json": json.dumps([target(3, 4)])}
+        )
     assert "conflicting_targets_sources" in exc.value.codes
 
 
@@ -74,7 +111,10 @@ def test_target_id_collision_is_reported_and_generated_ids_avoid_explicit_ids():
 
 
 def test_public_debug_reachability_is_rejected():
-    parsed = parse_rf_params({"debug_target_reachability": True}, collect_errors=True)
+    parsed = parse_rf_params(
+        {"pointing_mode": "earth_fixed", "targets": [target()], "debug_target_reachability": True},
+        collect_errors=True,
+    )
     assert "debug_target_reachability_not_public" in parsed["rf_param_errors"]
 
 

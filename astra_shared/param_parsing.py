@@ -251,7 +251,7 @@ def _normalize_antenna_model(value: str | None) -> str:
 def _parse_modulation(params: dict) -> str:
     modulation = str(params.get("modulation") or DEFAULT_MODULATION).strip().upper()
     if modulation not in MODULATIONS:
-        raise RfParamParseError(f"Unsupported modulation: {modulation}", codes=["modulation_invalid"], field="modulation", value=modulation)
+        raise RfParamParseError(f"Unsupported modulation: {modulation}", codes=["invalid_modulation"], field="modulation", value=modulation)
     return modulation
 
 
@@ -263,9 +263,7 @@ def _parse_data_rate_bps(params: dict) -> float | None:
         value = float(raw)
     except (TypeError, ValueError) as exc:
         raise RfParamParseError("data_rate_bps is invalid", codes=["data_rate_bps_invalid"], field="data_rate_bps", value=raw) from exc
-    if not math.isfinite(value):
-        raise RfParamParseError("data_rate_bps is invalid", codes=["data_rate_bps_invalid"], field="data_rate_bps", value=raw)
-    if value <= 0.0:
+    if not math.isfinite(value) or value <= 0.0:
         raise RfParamParseError("data_rate_bps must be greater than 0", codes=["data_rate_bps_out_of_range"], field="data_rate_bps", value=raw)
     return value
 
@@ -296,16 +294,16 @@ def _parse_bool(params: dict, key: str, default: bool) -> bool:
     return str(raw).strip().lower() in ("true", "1", "yes", "on", "enable", "enabled")
 
 
-def _parse_optional_float(params: dict, key: str) -> float | None:
+def _parse_optional_float(params: dict, key: str, *, invalid_code: str, out_of_range_code: str) -> float | None:
     raw = params.get(key)
     if raw in (None, "", "null"):
         return None
     try:
         value = float(raw)
     except (TypeError, ValueError) as exc:
-        raise RfParamParseError(f"{key} is invalid", codes=[f"{key}_invalid"], field=key, value=raw) from exc
+        raise RfParamParseError(f"{key} is invalid", codes=[invalid_code], field=key, value=raw) from exc
     if not math.isfinite(value):
-        raise RfParamParseError(f"{key} must be finite", codes=[f"{key}_invalid"], field=key, value=raw)
+        raise RfParamParseError(f"{key} must be finite", codes=[out_of_range_code], field=key, value=raw)
     return value
 
 
@@ -326,7 +324,7 @@ def _validate_custom_pfd_limit(value: float, key: str) -> float:
         raise RfParamParseError(
             f"{key} must be between {CUSTOM_PFD_LIMIT_MIN_DBW_M2:g} "
             f"and {CUSTOM_PFD_LIMIT_MAX_DBW_M2:g} dBW/m^2"
-            , codes=[f"{key}_out_of_range"], field=key, value=value
+            , codes=["pfd_custom_limit_out_of_range"], field=key, value=value
         )
     return value
 
@@ -365,7 +363,12 @@ def _parse_pfd_params(
         return compute_pfd, None, None, None, DEFAULT_PFD_REF_BW_HZ
 
     pfd_limit_band = _parse_pfd_limit_band(params)
-    pfd_ref_bw_hz = _parse_optional_float(params, "pfd_ref_bw_hz")
+    pfd_ref_bw_hz = _parse_optional_float(
+        params,
+        "pfd_ref_bw_hz",
+        invalid_code="pfd_ref_bw_hz_invalid",
+        out_of_range_code="pfd_ref_bw_hz_out_of_range",
+    )
     if pfd_ref_bw_hz is None:
         pfd_ref_bw_hz = DEFAULT_PFD_REF_BW_HZ
     if pfd_ref_bw_hz <= 0.0:
@@ -386,12 +389,22 @@ def _parse_pfd_params(
         )
 
     if pfd_limit_band == "custom":
-        pfd_l0_dbw_m2 = _parse_optional_float(params, "pfd_l0_dbw_m2")
-        pfd_l25_dbw_m2 = _parse_optional_float(params, "pfd_l25_dbw_m2")
+        pfd_l0_dbw_m2 = _parse_optional_float(
+            params,
+            "pfd_l0_dbw_m2",
+            invalid_code="pfd_custom_limit_invalid",
+            out_of_range_code="pfd_custom_limit_out_of_range",
+        )
+        pfd_l25_dbw_m2 = _parse_optional_float(
+            params,
+            "pfd_l25_dbw_m2",
+            invalid_code="pfd_custom_limit_invalid",
+            out_of_range_code="pfd_custom_limit_out_of_range",
+        )
         if pfd_l0_dbw_m2 is None or pfd_l25_dbw_m2 is None:
             raise RfParamParseError(
                 "custom PFD limit requires pfd_l0_dbw_m2 and pfd_l25_dbw_m2"
-                , codes=["custom_pfd_limit_invalid"], field="pfd_limit_band", value="custom"
+                , codes=["pfd_custom_limit_invalid"], field="pfd_limit_band", value="custom"
             )
         pfd_l0_dbw_m2 = _validate_custom_pfd_limit(pfd_l0_dbw_m2, "pfd_l0_dbw_m2")
         pfd_l25_dbw_m2 = _validate_custom_pfd_limit(pfd_l25_dbw_m2, "pfd_l25_dbw_m2")
@@ -412,22 +425,6 @@ def _first_non_null(params: dict, *keys: str):
         if value is not None and value != "":
             return value
     return None
-
-
-def _parse_earth_fixed_number(params: dict, key: str, default: float, errors: list[str]) -> float:
-    """Parse a bounded earth-fixed number without hiding invalid input."""
-    raw = params.get(key)
-    if raw is None or raw == "":
-        return default
-    try:
-        value = float(raw)
-    except (TypeError, ValueError):
-        errors.append(f"{key}_invalid")
-        return default
-    if not math.isfinite(value) or value < 0.0 or value > 90.0:
-        errors.append(f"{key}_invalid")
-        return default
-    return value
 
 
 def _canonicalize_targets(params: dict, errors: list[str]) -> list[dict]:
@@ -652,6 +649,16 @@ def parse_rf_params(
         earth_fixed_errors.append("earth_fixed_targets_required")
     if pointing_mode == "earth_fixed" and antenna_model == "phased_array":
         earth_fixed_errors.append("earth_fixed_phased_array_unsupported")
+    if pointing_mode != "earth_fixed" and not pointing_error:
+        # Earth-fixed inputs are validated only when the feature is in use. A
+        # nadir request keeps its existing behavior (plan §4.5): the minimum
+        # elevation is clamped to 0..90 as before, and earth-fixed-only fields
+        # (assignment rule, steering limit, targets, debug flags) are ignored.
+        earth_fixed_errors = []
+        elevation_key = "min_elevation_deg" if params.get("min_elevation_deg") not in (None, "") else "min_el_deg"
+        min_elevation_deg = _get_float(
+            params, elevation_key, float(path_default_min_elevation_deg), min_val=0.0, max_val=90.0
+        )
 
     parsed = {
         "eirp_dbw": _parse_eirp(params),

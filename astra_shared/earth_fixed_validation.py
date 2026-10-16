@@ -52,6 +52,15 @@ _VALIDATION_MESSAGES = {
     "earth_fixed_analysis_mode_unsupported": ("analysis_mode", "Earth-fixed pointing is not supported for this analysis mode."),
     "earth_fixed_phased_array_unsupported": ("antenna_model", "Earth-fixed pointing is not supported with phased_array."),
     "debug_target_reachability_not_public": ("debug_target_reachability", "Target reachability diagnostics are not public."),
+    "invalid_modulation": ("modulation", "Modulation must be one of BPSK, QPSK, OQPSK, 8PSK, 16QAM or 64QAM."),
+    "data_rate_bps_invalid": ("data_rate_bps", "Data rate must be a number."),
+    "data_rate_bps_out_of_range": ("data_rate_bps", "Data rate must be a finite number greater than 0."),
+    "code_rate_invalid": ("code_rate", "Code rate must be one of 1/4, 1/3, 2/5, 1/2, 3/5, 2/3, 3/4, 4/5, 5/6, 8/9, 9/10 or 1."),
+    "pfd_limit_band_invalid": ("pfd_limit_band", "PFD limit band is not a supported preset or custom."),
+    "pfd_ref_bw_hz_invalid": ("pfd_ref_bw_hz", "PFD reference bandwidth must be a number."),
+    "pfd_ref_bw_hz_out_of_range": ("pfd_ref_bw_hz", "PFD reference bandwidth must be a finite number greater than 0."),
+    "pfd_custom_limit_invalid": ("pfd_limit_band", "A custom PFD limit needs numeric L0 and L25 values."),
+    "pfd_custom_limit_out_of_range": ("pfd_limit_band", "Custom PFD limits L0 and L25 must be from -200 to 0 dBW/m^2."),
     "coverage_rf_null": ("rf", "Coverage RF configuration must be an object."),
     "coverage_rf_not_object": ("rf", "Coverage RF configuration must be an object."),
     "coverage_top_level_pointing_alias": ("rf", "Coverage earth-fixed pointing fields must be nested under rf."),
@@ -96,8 +105,8 @@ def validation_error_detail(code: str) -> dict:
     return {"code": code, "message": meta.get("message", "Validation failed."), "field": meta.get("field"), "category": meta.get("category", "internal")}
 
 
-def earth_fixed_validation_error_envelope(codes: list[str]) -> dict:
-    return {"error": "earth_fixed_validation_failed", "errors": [validation_error_detail(code) for code in dedupe_preserving_order(codes)]}
+def request_validation_error_envelope(codes: list[str]) -> dict:
+    return {"error": "request_validation_failed", "errors": [validation_error_detail(code) for code in dedupe_preserving_order(codes)]}
 
 
 class EarthFixedValidationError(ValueError):
@@ -180,8 +189,6 @@ def validate_earth_fixed_request(
                     and candidate_loss_probe_status in {"empty_satellites", "visible_no_reachable_target"}
                     and entry_point in {"coverage", "live_point_bulk", "rf_log"}
                 ):
-                    continue
-                if not probe_dynamic_adapters and source.get("dynamic_probe_required"):
                     continue
                 errors.append(source["error_code"])
     return dedupe_preserving_order(errors)
