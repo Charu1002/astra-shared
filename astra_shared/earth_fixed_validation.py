@@ -137,6 +137,17 @@ def earth_fixed_runtime_error_envelope(exc: EarthFixedRuntimeError) -> dict:
     }]}
 
 
+# Prepared states that prove there is no candidate-target scoring work, so a
+# probe-dependent loss source has nothing to probe (plan §4.5/§6.4). Coverage has
+# no observer; Point (RF-log and live/bulk) classifies against the observer's
+# visibility mask.
+_NO_PROBE_STATUSES_BY_ENTRY_POINT = {
+    "coverage": frozenset({"empty_satellites", "visible_no_reachable_target"}),
+    "live_point_bulk": frozenset({"no_visible_snapshot", "visible_no_reachable_target"}),
+    "rf_log": frozenset({"no_visible_snapshot", "visible_no_reachable_target"}),
+}
+
+
 def validate_earth_fixed_request(
     rf_params: dict,
     *,
@@ -186,8 +197,7 @@ def validate_earth_fixed_request(
                 # work availability, so never suppress it here.
                 if (
                     key != "atmospheric_loss"
-                    and candidate_loss_probe_status in {"empty_satellites", "visible_no_reachable_target"}
-                    and entry_point in {"coverage", "live_point_bulk", "rf_log"}
+                    and candidate_loss_probe_status in _NO_PROBE_STATUSES_BY_ENTRY_POINT.get(entry_point, ())
                 ):
                     continue
                 errors.append(source["error_code"])

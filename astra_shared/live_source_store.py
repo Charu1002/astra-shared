@@ -278,10 +278,22 @@ def retrieve_resolution_draft(resolution_id: str) -> dict[str, Any] | None:
     return json.loads(row["draft_json"]) if row else None
 
 
-def store_run(run: dict[str, Any], run_id: str | None = None) -> str:
+def store_run(
+    run: dict[str, Any],
+    run_id: str | None = None,
+    *,
+    projection_rows: list[dict[str, Any]] | None = None,
+) -> str:
+    """Insert a new run. ``projection_rows`` (a Point run's initial sample) are
+    inserted in the SAME transaction, so the record and its durable projection
+    rows exist together or not at all."""
     init_schema()
     now = utc_now()
     rid = run_id or uuid.uuid4().hex
+    rows = projection_rows or []
+    keys = [str(row["key"]) for row in rows]
+    if len(keys) != len(set(keys)):
+        raise ValueError("duplicate Point projection key")
 
     state_version = int(run.get("_state_version", 0) or 0)
     lifecycle_generation = int(run.get("_lifecycle_generation", 0) or 0)
@@ -309,6 +321,12 @@ def store_run(run: dict[str, Any], run_id: str | None = None) -> str:
                     lifecycle_state,
                 ),
             )
+            for row in rows:
+                conn.execute(
+                    "INSERT INTO live_point_projections "
+                    "(run_id, projection_key, projection_json, created_at) VALUES (?, ?, ?, ?)",
+                    (rid, str(row["key"]), json.dumps(row, separators=(",", ":")), isoformat_z(now)),
+                )
 
     _with_retry(_op)
     return rid
@@ -451,18 +469,32 @@ def commit_point_run_cas(
             if current is None:
                 return "conflict"
             existing = {
-                row[0]
+                row[0]: row[1]
                 for row in conn.execute(
-                    "SELECT projection_key FROM live_point_projections WHERE run_id = ?",
+                    "SELECT projection_key, projection_json FROM live_point_projections WHERE run_id = ?",
                     (run_id,),
                 ).fetchall()
             }
+
+            def _exact_completion() -> bool:
+                # A lost CAS is "already_committed" only when every submitted
+                # four-part key is stored WITH the same row content, i.e. this
+                # attempt is an exact completion of the commit that advanced the
+                # version, not merely a key overlap.
+                if not keys:
+                    return False
+                for row in rows:
+                    stored = existing.get(str(row["key"]))
+                    if stored is None or json.loads(stored) != json.loads(json.dumps(row, separators=(",", ":"))):
+                        return False
+                return True
+
             if (
                 current["state_version"] != expected_version
                 or current["lifecycle_generation"] != expected_generation
                 or current["lifecycle_state"] != "active"
             ):
-                return "already_committed" if keys and set(keys).issubset(existing) else "conflict"
+                return "already_committed" if _exact_completion() else "conflict"
             # Do the conditional UPDATE FIRST. If another writer won the version race
             # between the SELECT above and here, rowcount is 0 and we return before
             # inserting any projection rows — otherwise the rows would be committed by
@@ -479,7 +511,7 @@ def commit_point_run_cas(
                 ),
             )
             if cursor.rowcount != 1:
-                return "already_committed" if keys and set(keys).issubset(existing) else "conflict"
+                return "already_committed" if _exact_completion() else "conflict"
             now_iso = isoformat_z(utc_now())
             for row in rows:
                 conn.execute(
