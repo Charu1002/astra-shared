@@ -477,11 +477,25 @@ def commit_point_run_cas(
             }
 
             def _exact_completion() -> bool:
-                # A lost CAS is "already_committed" only when every submitted
-                # four-part key is stored WITH the same row content, i.e. this
-                # attempt is an exact completion of the commit that advanced the
-                # version, not merely a key overlap.
+                # A lost CAS is "already_committed" only when this attempt is an
+                # exact completion of the run's LAST commit: that commit advanced
+                # the version from the one this attempt read (so it is the very
+                # next version), it is the newest stored projection, and every
+                # submitted four-part key is stored WITH the same row content.
+                # Matching an older sample is a conflict.
                 if not keys:
+                    return False
+                latest = conn.execute(
+                    "SELECT state_version FROM live_runs WHERE run_id = ?", (run_id,)
+                ).fetchone()
+                if latest is None or latest["state_version"] != int(expected_version) + 1:
+                    return False
+                newest = conn.execute(
+                    "SELECT projection_key FROM live_point_projections WHERE run_id = ? "
+                    "ORDER BY rowid DESC LIMIT 1",
+                    (run_id,),
+                ).fetchone()
+                if newest is None or newest[0] not in set(keys):
                     return False
                 for row in rows:
                     stored = existing.get(str(row["key"]))
