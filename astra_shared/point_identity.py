@@ -10,6 +10,8 @@ def canonical_point_sat_id(
     order_index: int,
     legacy_unique_names: set[str] | None = None,
 ) -> str:
+    if not isinstance(sat, dict):
+        raise ValueError("point_satellite_not_object")
     for key in ("canonical_sat_id", "id", "catalog_id", "norad_id"):
         value = sat.get(key)
         if value not in (None, ""):
@@ -34,6 +36,10 @@ def canonical_point_sat_id(
 
 
 def prepare_point_satellite_ids(satellites: list[dict], *, source: str) -> list[dict]:
+    # A satellite that is not an object (null, a string, a number, a list) is a
+    # request error, never an AttributeError from sat.get() below.
+    if any(not isinstance(sat, dict) for sat in satellites):
+        raise ValueError("point_satellite_not_object")
     names = {}
     for sat in satellites:
         name = sat.get("name")
