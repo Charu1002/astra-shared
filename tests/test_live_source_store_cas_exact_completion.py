@@ -50,3 +50,12 @@ def test_a_delayed_retry_of_an_older_sample_is_a_conflict_after_newer_samples(tm
     assert live_source_store.commit_point_run_cas(run_id, {"kind": "test"}, expected_version=0, projection_rows=[first]) == "conflict"
     # The last commit can still be completed idempotently.
     assert live_source_store.commit_point_run_cas(run_id, {"kind": "test"}, expected_version=1, projection_rows=[second]) == "already_committed"
+
+
+def test_an_empty_batch_retry_is_identified_only_at_the_same_next_version(tmp_path, monkeypatch):
+    monkeypatch.setenv("ASTRA_DATA_DIR", str(tmp_path))
+    run_id = live_source_store.store_run({"kind": "test"})
+    assert live_source_store.commit_point_run_cas(run_id, {"kind": "test"}, expected_version=0, projection_rows=[]) == "committed"
+    assert live_source_store.commit_point_run_cas(run_id, {"kind": "test"}, expected_version=0, projection_rows=[]) == "already_committed"
+    assert live_source_store.commit_point_run_cas(run_id, {"kind": "test"}, expected_version=1, projection_rows=[]) == "committed"
+    assert live_source_store.commit_point_run_cas(run_id, {"kind": "test"}, expected_version=0, projection_rows=[]) == "conflict"

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import datetime as _dt
+import hashlib
 import json
 import os
 import sqlite3
@@ -294,7 +295,6 @@ def store_run(
     keys = [str(row["key"]) for row in rows]
     if len(keys) != len(set(keys)):
         raise ValueError("duplicate Point projection key")
-
     state_version = int(run.get("_state_version", 0) or 0)
     lifecycle_generation = int(run.get("_lifecycle_generation", 0) or 0)
     lifecycle_state = str(run.get("_lifecycle_state", "active") or "active")
@@ -458,11 +458,13 @@ def commit_point_run_cas(
     keys = [str(row["key"]) for row in rows]
     if len(keys) != len(set(keys)):
         raise ValueError("duplicate Point projection key")
+    batch_json = json.dumps(rows, separators=(",", ":"), sort_keys=True, allow_nan=False)
+    batch_id = hashlib.sha256(batch_json.encode("utf-8")).hexdigest()
 
     def _op() -> str:
         with _connect() as conn:
             current = conn.execute(
-                "SELECT state_version, lifecycle_generation, lifecycle_state "
+                "SELECT state_version, lifecycle_generation, lifecycle_state, run_json "
                 "FROM live_runs WHERE run_id = ?",
                 (run_id,),
             ).fetchone()
@@ -477,31 +479,19 @@ def commit_point_run_cas(
             }
 
             def _exact_completion() -> bool:
-                # A lost CAS is "already_committed" only when this attempt is an
-                # exact completion of the run's LAST commit: that commit advanced
-                # the version from the one this attempt read (so it is the very
-                # next version), it is the newest stored projection, and every
-                # submitted four-part key is stored WITH the same row content.
-                # Matching an older sample is a conflict.
-                if not keys:
+                # The durable batch marker identifies the exact submission that
+                # advanced this version, including an empty batch. Projection
+                # adjacency alone cannot distinguish retries from later commits.
+                if current["state_version"] != int(expected_version) + 1:
                     return False
-                latest = conn.execute(
-                    "SELECT state_version FROM live_runs WHERE run_id = ?", (run_id,)
-                ).fetchone()
-                if latest is None or latest["state_version"] != int(expected_version) + 1:
+                try:
+                    stored_run = json.loads(current["run_json"])
+                except (TypeError, ValueError):
                     return False
-                newest = conn.execute(
-                    "SELECT projection_key FROM live_point_projections WHERE run_id = ? "
-                    "ORDER BY rowid DESC LIMIT 1",
-                    (run_id,),
-                ).fetchone()
-                if newest is None or newest[0] not in set(keys):
-                    return False
-                for row in rows:
-                    stored = existing.get(str(row["key"]))
-                    if stored is None or json.loads(stored) != json.loads(json.dumps(row, separators=(",", ":"))):
-                        return False
-                return True
+                return stored_run.get("_point_last_batch") == {
+                    "version": int(expected_version) + 1,
+                    "batch_id": batch_id,
+                }
 
             if (
                 current["state_version"] != expected_version
@@ -518,7 +508,10 @@ def commit_point_run_cas(
                 "WHERE run_id = ? AND state_version = ? AND lifecycle_generation = ? "
                 "AND lifecycle_state = 'active'",
                 (
-                    json.dumps(payload, separators=(",", ":")),
+                    json.dumps(
+                        {**payload, "_point_last_batch": {"version": int(expected_version) + 1, "batch_id": batch_id}},
+                        separators=(",", ":"),
+                    ),
                     run_id,
                     int(expected_version),
                     int(expected_generation),

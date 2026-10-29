@@ -82,6 +82,7 @@ _VALIDATION_MESSAGES = {
     "point_rf_params_not_object": ("rf_params", "rf_params must be a JSON object."),
     "point_handover_context_invalid": ("handover_context_by_sat_id", "handover_context_by_sat_id must be an object whose entries are objects."),
     "rf_log_satellites_required": ("satellites", "RF log needs a non-empty list of satellites."),
+    "rf_log_positions_not_list": ("satellites.positions", "Each RF-log satellite positions value must be an array."),
     "point_observer_required": ("ground_lat_deg", "Observer ground_lat_deg and ground_lon_deg are required."),
     "point_ground_lat_deg_invalid": ("ground_lat_deg", "Observer ground_lat_deg must be a finite number."),
     "point_ground_lon_deg_invalid": ("ground_lon_deg", "Observer ground_lon_deg must be a finite number."),
