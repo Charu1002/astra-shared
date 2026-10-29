@@ -21,59 +21,17 @@ from .defaults import (
     POLARIZATION_LOSS_DB_MAX,
     POLARIZATION_LOSS_DB_MIN,
 )
+from .rf_schema import (
+    DEFAULT_OVERHEAD_PERCENT,
+    DEFAULT_SHANNON_ATTENUATION_FACTOR,
+    RfConfigError,
+    convert_rf_block,
+    parse_bool_value,
+)
 
 logger = logging.getLogger(__name__)
 
-
-class RfParamParseError(ValueError):
-    """Fail-closed RF parsing error with stable request codes."""
-
-    def __init__(self, message: str, *, codes: list[str], field: str | None = None, value=None):
-        self.codes = list(dict.fromkeys(codes))
-        self.field = field
-        self.value = value
-        super().__init__(message)
-
-
-def _normalize_pointing_mode(value: str | None) -> tuple[str, str | None]:
-    if value is None or value == "":
-        return "nadir", None
-    normalized = {"nadir": "nadir", "earth_moving": "nadir", "earth-moving": "nadir", "earth_fixed": "earth_fixed", "earth-fixed": "earth_fixed", "targeted": "earth_fixed"}.get(str(value).strip().lower())
-    return (normalized, None) if normalized else ("nadir", "invalid_pointing_mode")
-
-
-def _normalize_assignment_rule(value: str | None) -> tuple[str, str | None]:
-    if value is None or value == "":
-        return "highest_elevation", None
-    normalized = str(value).strip().lower()
-    if normalized in {"highest_elevation", "highest_cn"}:
-        return normalized, None
-    return "highest_elevation", "invalid_assignment_rule"
-
-
-def _parse_bounded_float(params: dict, key: str, default: float, min_val: float, max_val: float, error_prefix: str) -> tuple[float, str | None]:
-    raw = params.get(key)
-    if raw is None or raw == "":
-        return default, None
-    try:
-        value = float(raw)
-    except (TypeError, ValueError):
-        return default, f"{error_prefix}_invalid"
-    if not math.isfinite(value):
-        return default, f"{error_prefix}_invalid"
-    if value < min_val or value > max_val:
-        return default, f"{error_prefix}_out_of_range"
-    return value, None
-
-
-def _parse_min_elevation_deg(params: dict, default: float) -> tuple[float, str | None]:
-    value = _first_non_null(params, "min_elevation_deg", "min_el_deg")
-    if value is None:
-        return default, None
-    key = "min_elevation_deg" if params.get("min_elevation_deg") not in (None, "") else "min_el_deg"
-    return _parse_bounded_float({key: value}, key, default, 0.0, 90.0, key)
-
-MODULATIONS = {"BPSK", "QPSK", "OQPSK", "8PSK", "16QAM", "64QAM"}
+MODULATIONS = {"BPSK", "QPSK", "OQPSK", "8PSK", "16QAM", "64QAM", "256QAM"}
 VALID_CODE_RATES = (
     1.0 / 4.0,
     1.0 / 3.0,
@@ -267,21 +225,8 @@ def _parse_max_gain_dbi(params: dict, antenna_model: str) -> float:
 def _parse_modulation(params: dict) -> str:
     modulation = str(params.get("modulation") or DEFAULT_MODULATION).strip().upper()
     if modulation not in MODULATIONS:
-        raise RfParamParseError(f"Unsupported modulation: {modulation}", codes=["invalid_modulation"], field="modulation", value=modulation)
+        raise RfConfigError(f"Unsupported modulation: {modulation}")
     return modulation
-
-
-def _parse_data_rate_bps(params: dict) -> float | None:
-    raw = params.get("data_rate_bps")
-    if raw in (None, "", "null"):
-        return None
-    try:
-        value = float(raw)
-    except (TypeError, ValueError) as exc:
-        raise RfParamParseError("data_rate_bps is invalid", codes=["data_rate_bps_invalid"], field="data_rate_bps", value=raw) from exc
-    if not math.isfinite(value) or value <= 0.0:
-        raise RfParamParseError("data_rate_bps must be greater than 0", codes=["data_rate_bps_out_of_range"], field="data_rate_bps", value=raw)
-    return value
 
 
 def _parse_code_rate(params: dict) -> float:
@@ -290,36 +235,93 @@ def _parse_code_rate(params: dict) -> float:
         return DEFAULT_CODE_RATE
     try:
         value = float(raw)
-    except (TypeError, ValueError) as exc:
-        raise RfParamParseError("code_rate is invalid", codes=["code_rate_invalid"], field="code_rate", value=raw) from exc
-    if not math.isfinite(value):
-        raise RfParamParseError("code_rate is invalid", codes=["code_rate_invalid"], field="code_rate", value=raw)
-    if not any(math.isclose(value, allowed, rel_tol=0.0, abs_tol=1.0e-9) for allowed in VALID_CODE_RATES):
-        raise RfParamParseError(f"code_rate must be one of: {VALID_CODE_RATE_LABELS}", codes=["code_rate_invalid"], field="code_rate", value=raw)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise RfConfigError(f"code_rate must be one of: {VALID_CODE_RATE_LABELS}") from exc
+    if not any(
+        math.isclose(value, allowed, rel_tol=0.0, abs_tol=1.0e-9)
+        for allowed in VALID_CODE_RATES
+    ):
+        raise RfConfigError(f"code_rate must be one of: {VALID_CODE_RATE_LABELS}")
     return value
 
 
 def _parse_bool(params: dict, key: str, default: bool) -> bool:
+    return parse_bool_value(params.get(key, default), default)
+
+
+def _parse_mcs_selection(params: dict) -> str:
+    raw = params.get("mcs_selection", "fixed")
+    if raw in (None, ""):
+        return "fixed"
+    if raw not in ("fixed", "auto"):
+        raise RfConfigError("mcs_selection must be fixed or auto")
+    return raw
+
+
+def _parse_conditional_number(
+    params: dict,
+    key: str,
+    default: float,
+    *,
+    used: bool,
+    valid,
+    error: str,
+) -> float:
     raw = params.get(key, default)
     if raw in (None, ""):
-        return default
+        raw = default
     if isinstance(raw, bool):
-        return raw
-    if isinstance(raw, (int, float)):
-        return raw != 0
-    return str(raw).strip().lower() in ("true", "1", "yes", "on", "enable", "enabled")
+        if used:
+            raise RfConfigError(error)
+        return default
+    try:
+        value = float(raw)
+    except (TypeError, ValueError, OverflowError):
+        if used:
+            raise RfConfigError(error)
+        return default
+    if not math.isfinite(value) or not valid(value):
+        if used:
+            raise RfConfigError(error)
+        # Hidden, unused values remain part of the saved project.  Preserve
+        # finite values so a Fixed/link-off replay does not rewrite them.
+        if math.isfinite(value):
+            return value
+        return default
+    return value
 
 
-def _parse_optional_float(params: dict, key: str, *, invalid_code: str, out_of_range_code: str) -> float | None:
+def _resolve_bandwidth_hz(params: dict) -> float:
+    if params.get("bandwidth_mhz") not in (None, "", "null"):
+        key = "bandwidth_mhz"
+        multiplier = 1.0e6
+    elif params.get("bandwidth_hz") not in (None, "", "null"):
+        key = "bandwidth_hz"
+        multiplier = 1.0
+    else:
+        return float(DEFAULT_BANDWIDTH_HZ)
+    raw = params[key]
+    if isinstance(raw, bool):
+        raise RfConfigError(f"{key} must be a positive finite number")
+    try:
+        value = float(raw) * multiplier
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise RfConfigError(f"{key} must be a positive finite number") from exc
+    if not math.isfinite(value) or value <= 0:
+        raise RfConfigError(f"{key} must be a positive finite number")
+    return value
+
+
+def _parse_optional_float(params: dict, key: str) -> float | None:
     raw = params.get(key)
     if raw in (None, "", "null"):
         return None
     try:
         value = float(raw)
-    except (TypeError, ValueError) as exc:
-        raise RfParamParseError(f"{key} is invalid", codes=[invalid_code], field=key, value=raw) from exc
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError(f"{key} must be finite") from exc
     if not math.isfinite(value):
-        raise RfParamParseError(f"{key} must be finite", codes=[out_of_range_code], field=key, value=raw)
+        raise ValueError(f"{key} must be finite")
     return value
 
 
@@ -331,16 +333,15 @@ def _parse_pfd_limit_band(params: dict) -> str | None:
     if band.lower() == "none":
         return None
     if band not in PFD_LIMIT_PRESETS and band != "custom":
-        raise RfParamParseError(f"Unsupported PFD limit band: {raw}", codes=["pfd_limit_band_invalid"], field="pfd_limit_band", value=raw)
+        raise ValueError(f"Unsupported PFD limit band: {raw}")
     return band
 
 
 def _validate_custom_pfd_limit(value: float, key: str) -> float:
     if value < CUSTOM_PFD_LIMIT_MIN_DBW_M2 or value > CUSTOM_PFD_LIMIT_MAX_DBW_M2:
-        raise RfParamParseError(
+        raise ValueError(
             f"{key} must be between {CUSTOM_PFD_LIMIT_MIN_DBW_M2:g} "
             f"and {CUSTOM_PFD_LIMIT_MAX_DBW_M2:g} dBW/m^2"
-            , codes=["pfd_custom_limit_out_of_range"], field=key, value=value
         )
     return value
 
@@ -379,16 +380,11 @@ def _parse_pfd_params(
         return compute_pfd, None, None, None, DEFAULT_PFD_REF_BW_HZ
 
     pfd_limit_band = _parse_pfd_limit_band(params)
-    pfd_ref_bw_hz = _parse_optional_float(
-        params,
-        "pfd_ref_bw_hz",
-        invalid_code="pfd_ref_bw_hz_invalid",
-        out_of_range_code="pfd_ref_bw_hz_out_of_range",
-    )
+    pfd_ref_bw_hz = _parse_optional_float(params, "pfd_ref_bw_hz")
     if pfd_ref_bw_hz is None:
         pfd_ref_bw_hz = DEFAULT_PFD_REF_BW_HZ
     if pfd_ref_bw_hz <= 0.0:
-        raise RfParamParseError("pfd_ref_bw_hz must be greater than 0", codes=["pfd_ref_bw_hz_out_of_range"], field="pfd_ref_bw_hz", value=pfd_ref_bw_hz)
+        raise ValueError("pfd_ref_bw_hz must be greater than 0")
 
     if pfd_limit_band in PFD_LIMIT_PRESETS:
         preset = PFD_LIMIT_PRESETS[pfd_limit_band]
@@ -405,22 +401,11 @@ def _parse_pfd_params(
         )
 
     if pfd_limit_band == "custom":
-        pfd_l0_dbw_m2 = _parse_optional_float(
-            params,
-            "pfd_l0_dbw_m2",
-            invalid_code="pfd_custom_limit_invalid",
-            out_of_range_code="pfd_custom_limit_out_of_range",
-        )
-        pfd_l25_dbw_m2 = _parse_optional_float(
-            params,
-            "pfd_l25_dbw_m2",
-            invalid_code="pfd_custom_limit_invalid",
-            out_of_range_code="pfd_custom_limit_out_of_range",
-        )
+        pfd_l0_dbw_m2 = _parse_optional_float(params, "pfd_l0_dbw_m2")
+        pfd_l25_dbw_m2 = _parse_optional_float(params, "pfd_l25_dbw_m2")
         if pfd_l0_dbw_m2 is None or pfd_l25_dbw_m2 is None:
-            raise RfParamParseError(
+            raise ValueError(
                 "custom PFD limit requires pfd_l0_dbw_m2 and pfd_l25_dbw_m2"
-                , codes=["pfd_custom_limit_invalid"], field="pfd_limit_band", value="custom"
             )
         pfd_l0_dbw_m2 = _validate_custom_pfd_limit(pfd_l0_dbw_m2, "pfd_l0_dbw_m2")
         pfd_l25_dbw_m2 = _validate_custom_pfd_limit(pfd_l25_dbw_m2, "pfd_l25_dbw_m2")
@@ -434,106 +419,14 @@ def _parse_pfd_params(
 # =============================================================================
 
 
-def _first_non_null(params: dict, *keys: str):
-    """Return the first supplied value, treating null as unsupplied."""
-    for key in keys:
-        value = params.get(key)
-        if value is not None and value != "":
-            return value
-    return None
-
-
-def _canonicalize_targets(params: dict, errors: list[str]) -> list[dict]:
-    """Decode and normalize the two supported target input representations."""
-    sources = []
-    if "targets_json" in params and params.get("targets_json") not in (None, ""):
-        try:
-            decoded = params["targets_json"]
-            sources.append(json.loads(decoded) if isinstance(decoded, str) else decoded)
-        except (TypeError, ValueError, json.JSONDecodeError):
-            errors.append("invalid_targets_json")
-    if "targets" in params and params.get("targets") is not None:
-        sources.append(params.get("targets"))
-
-    canonical_sources = []
-    for source in sources:
-        if not isinstance(source, list):
-            errors.append("targets_not_list")
-            continue
-        used_ids: set[str] = set()
-        canonical = []
-        for index, row in enumerate(source):
-            if not isinstance(row, dict):
-                errors.append("target_not_object")
-                continue
-            raw_target_id = row.get("target_id")
-            # Treat an explicit JSON null as "not supplied" (auto-generate), not as
-            # the literal string "None"; an explicit empty string is still a blank error.
-            target_id_supplied = "target_id" in row and raw_target_id is not None
-            target_id = str(raw_target_id).strip() if raw_target_id is not None else ""
-            if target_id_supplied and not target_id:
-                errors.append("target_id_blank")
-                continue
-            if not target_id:
-                next_id = index + 1
-                target_id = f"target-{next_id}"
-                while target_id in used_ids:
-                    next_id += 1
-                    target_id = f"target-{next_id}"
-            if target_id in used_ids:
-                errors.append("target_id_duplicate")
-                continue
-            used_ids.add(target_id)
-            label = str(row.get("label") or f"Target-{index + 1}").strip() or f"Target-{index + 1}"
-            try:
-                lat = float(row.get("target_lat"))
-            except (TypeError, ValueError):
-                errors.append("target_lat_invalid")
-                continue
-            try:
-                lon = float(row.get("target_lon"))
-            except (TypeError, ValueError):
-                errors.append("target_lon_invalid")
-                continue
-            try:
-                alt = float(row.get("target_alt_km", 0.0) or 0.0)
-            except (TypeError, ValueError):
-                errors.append("target_altitude_unsupported")
-                continue
-            if not math.isfinite(lat) or not -90.0 <= lat <= 90.0:
-                errors.append("target_lat_out_of_range" if math.isfinite(lat) else "target_lat_invalid")
-                continue
-            if not math.isfinite(lon) or not -180.0 <= lon <= 180.0:
-                errors.append("target_lon_out_of_range" if math.isfinite(lon) else "target_lon_invalid")
-                continue
-            if not math.isfinite(alt) or alt != 0.0:
-                errors.append("target_altitude_unsupported")
-                continue
-            canonical.append({
-                "target_id": target_id,
-                "label": label,
-                "target_lat": lat,
-                "target_lon": lon,
-                "target_alt_km": 0.0,
-            })
-        canonical_sources.append(canonical)
-
-    if len(canonical_sources) == 2 and canonical_sources[0] != canonical_sources[1]:
-        errors.append("conflicting_targets_sources")
-    return canonical_sources[0] if canonical_sources else []
-
-
-def parse_rf_params(
-    params: dict,
-    *,
-    path_default_min_elevation_deg: float = 5.0,
-    collect_errors: bool = False,
-) -> dict:
+def parse_rf_params(params: dict) -> dict:
     """Parse RF parameters from any source into a canonical dict.
 
     Accepts form args, config.json, project files, or HTTP request bodies.
     Callers use the subset they need � unused keys are harmless.
     """
+    params, _conversion = convert_rf_block(params)
+
     if params.get("frequency_ghz") not in (None, "") or params.get("frequency") not in (
         None,
         "",
@@ -568,28 +461,7 @@ def parse_rf_params(
         max_val=10000.0,
     )
 
-    bw_mhz_raw = params.get("bandwidth_mhz")
-    bw_hz_raw = params.get("bandwidth_hz")
-    bandwidth_hz = None
-    explicit_bw = False
-    if bw_mhz_raw not in (None, "", "null"):
-        explicit_bw = True
-        try:
-            bandwidth_hz = float(bw_mhz_raw) * 1e6
-        except (TypeError, ValueError):
-            bandwidth_hz = None
-    elif bw_hz_raw not in (None, "", "null"):
-        explicit_bw = True
-        try:
-            bandwidth_hz = float(bw_hz_raw)
-        except (TypeError, ValueError):
-            bandwidth_hz = None
-
-    if bandwidth_hz is not None and bandwidth_hz <= 0:
-        bandwidth_hz = None
-
-    if bandwidth_hz is None and not explicit_bw:
-        bandwidth_hz = DEFAULT_BANDWIDTH_HZ
+    bandwidth_hz = _resolve_bandwidth_hz(params)
 
     logger.debug(
         "[RF] noise_temp_k=%s bandwidth_hz=%s cn_enabled=%s",
@@ -602,35 +474,29 @@ def parse_rf_params(
         _get_str(params, "antenna_model", "gaussian")
     )
 
-    parser_errors: list[str] = []
-    try:
-        modulation = _parse_modulation(params)
-    except RfParamParseError as exc:
-        if not collect_errors:
-            raise
-        parser_errors.extend(exc.codes)
-        modulation = DEFAULT_MODULATION
-    try:
-        data_rate_bps = _parse_data_rate_bps(params)
-    except RfParamParseError as exc:
-        if not collect_errors:
-            raise
-        parser_errors.extend(exc.codes)
-        data_rate_bps = None
-    try:
-        code_rate = _parse_code_rate(params)
-    except RfParamParseError as exc:
-        if not collect_errors:
-            raise
-        parser_errors.extend(exc.codes)
-        code_rate = DEFAULT_CODE_RATE
-    try:
-        compute_pfd, pfd_limit_band, pfd_l0_dbw_m2, pfd_l25_dbw_m2, pfd_ref_bw_hz = _parse_pfd_params(params)
-    except RfParamParseError as exc:
-        if not collect_errors:
-            raise
-        parser_errors.extend(exc.codes)
-        compute_pfd, pfd_limit_band, pfd_l0_dbw_m2, pfd_l25_dbw_m2, pfd_ref_bw_hz = (DEFAULT_COMPUTE_PFD, None, None, None, DEFAULT_PFD_REF_BW_HZ)
+    digital_link = _parse_bool(params, "digital_link", False)
+    mcs_selection = _parse_mcs_selection(params)
+    shannon_attenuation_factor = _parse_conditional_number(
+        params,
+        "shannon_attenuation_factor",
+        DEFAULT_SHANNON_ATTENUATION_FACTOR,
+        used=digital_link and mcs_selection == "auto",
+        valid=lambda value: 0 < value <= 1,
+        error="shannon_attenuation_factor must be in (0, 1]",
+    )
+    overhead_percent = _parse_conditional_number(
+        params,
+        "overhead_percent",
+        DEFAULT_OVERHEAD_PERCENT,
+        used=digital_link,
+        valid=lambda value: 0 <= value < 50,
+        error="overhead_percent must be in [0, 50)",
+    )
+    modulation = _parse_modulation(params)
+    code_rate = _parse_code_rate(params)
+    compute_pfd, pfd_limit_band, pfd_l0_dbw_m2, pfd_l25_dbw_m2, pfd_ref_bw_hz = (
+        _parse_pfd_params(params)
+    )
     pfd_checks = _pfd_checks_for_band(
         pfd_limit_band,
         pfd_l0_dbw_m2,
@@ -640,43 +506,7 @@ def parse_rf_params(
 
     clutter_rf = normalize_clutter_rf(params)
 
-    earth_fixed_errors: list[str] = []
-    pointing_mode, pointing_error = _normalize_pointing_mode(params.get("pointing_mode"))
-    if pointing_error:
-        earth_fixed_errors.append(pointing_error)
-    assignment_rule, assignment_error = _normalize_assignment_rule(params.get("assignment_rule"))
-    if assignment_error:
-        earth_fixed_errors.append(assignment_error)
-    max_steer_deg, max_steer_error = _parse_bounded_float(params, "max_steer_deg", 60.0, 0.0, 90.0, "max_steer_deg")
-    if max_steer_error:
-        earth_fixed_errors.append(max_steer_error)
-    min_elevation_deg, min_elevation_error = _parse_min_elevation_deg(params, float(path_default_min_elevation_deg))
-    if min_elevation_error:
-        earth_fixed_errors.append(min_elevation_error)
-    for elevation_key in ("min_elevation_deg", "min_el_deg"):
-        if params.get(elevation_key) is not None and params.get(elevation_key) != "":
-            _, alias_error = _parse_bounded_float(params, elevation_key, float(path_default_min_elevation_deg), 0.0, 90.0, elevation_key)
-            if alias_error and alias_error not in earth_fixed_errors:
-                earth_fixed_errors.append(alias_error)
-    if "debug_target_reachability" in params:
-        earth_fixed_errors.append("debug_target_reachability_not_public")
-    targets = _canonicalize_targets(params, earth_fixed_errors)
-    if pointing_mode == "earth_fixed" and not targets:
-        earth_fixed_errors.append("earth_fixed_targets_required")
-    if pointing_mode == "earth_fixed" and antenna_model == "phased_array":
-        earth_fixed_errors.append("earth_fixed_phased_array_unsupported")
-    if pointing_mode != "earth_fixed" and not pointing_error:
-        # Earth-fixed inputs are validated only when the feature is in use. A
-        # nadir request keeps its existing behavior (plan §4.5): the minimum
-        # elevation is clamped to 0..90 as before, and earth-fixed-only fields
-        # (assignment rule, steering limit, targets, debug flags) are ignored.
-        earth_fixed_errors = []
-        elevation_key = "min_elevation_deg" if params.get("min_elevation_deg") not in (None, "") else "min_el_deg"
-        min_elevation_deg = _get_float(
-            params, elevation_key, float(path_default_min_elevation_deg), min_val=0.0, max_val=90.0
-        )
-
-    parsed = {
+    return {
         "eirp_dbw": _parse_eirp(params),
         "rx_gain_dbi": _get_float(
             params, "rx_gain_dbi", _get_float(params, "rx_gain", DEFAULT_RX_GAIN_DBI)
@@ -723,29 +553,17 @@ def parse_rf_params(
         ),
         "system_noise_temp_k": system_noise_temp_k,
         "bandwidth_hz": bandwidth_hz,
+        "digital_link": digital_link,
+        "mcs_selection": mcs_selection,
         "modulation": modulation,
-        "data_rate_bps": data_rate_bps,
         "code_rate": code_rate,
+        "shannon_attenuation_factor": shannon_attenuation_factor,
+        "overhead_percent": overhead_percent,
         "compute_pfd": compute_pfd,
         "pfd_limit_band": pfd_limit_band,
         "pfd_ref_bw_hz": pfd_ref_bw_hz,
         "pfd_l0_dbw_m2": pfd_l0_dbw_m2,
         "pfd_l25_dbw_m2": pfd_l25_dbw_m2,
-        "min_el_deg": min_elevation_deg,
-        "min_elevation_deg": min_elevation_deg,
-        "pointing_mode": pointing_mode,
-        "assignment_rule": assignment_rule,
-        "max_steer_deg": max_steer_deg,
-        "targets": targets,
         "pfd_checks": pfd_checks,
+        "min_el_deg": _get_float(params, "min_el_deg", 5.0, min_val=0.0, max_val=90.0),
     }
-    all_errors = list(dict.fromkeys(parser_errors + earth_fixed_errors))
-    if all_errors and not collect_errors:
-        raise RfParamParseError(
-            "Invalid RF request parameters",
-            codes=all_errors,
-            field=None,
-        )
-    if all_errors or collect_errors:
-        parsed["rf_param_errors"] = all_errors
-    return parsed

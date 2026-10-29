@@ -229,13 +229,16 @@ def test_converter_is_idempotent_for_versioned_payload():
     }
 
 
-def test_converter_rejects_unknown_schema_versions():
+def test_converter_leaves_version_two_unchanged_and_rejects_unknown_versions():
     payload = {"rf": {"rf_schema_version": 2, "clutter_mode": "disabled"}}
 
-    with pytest.raises(converter.ConverterError, match="unsupported rf_schema_version"):
-        converter.convert_payload(payload)
-
+    assert converter.convert_payload(payload) == (False, False)
     assert payload["rf"]["rf_schema_version"] == 2
+
+    with pytest.raises(converter.ConverterError, match="unsupported rf_schema_version"):
+        converter.convert_payload(
+            {"rf": {"rf_schema_version": 3, "clutter_mode": "disabled"}}
+        )
 
 
 def test_converter_rejects_boolean_schema_version():

@@ -897,8 +897,11 @@ def test_phase3_normalizer_rejects_missing_or_unknown_versions():
     message = str(excinfo.value)
     assert "rf_schema_version is required" in message
     assert "tools/convert_clutter_config.py" in message
+    assert normalize_clutter_rf(
+        {"rf_schema_version": 2, "clutter_mode": "disabled"}
+    )["rf_schema_version"] == 2
     with pytest.raises(ClutterConfigError, match="unsupported"):
-        normalize_clutter_rf({"rf_schema_version": 2, "clutter_mode": "disabled"})
+        normalize_clutter_rf({"rf_schema_version": 3, "clutter_mode": "disabled"})
 
 
 def test_phase3_normalizer_requires_clutter_mode_in_versioned_blocks():
