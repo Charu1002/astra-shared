@@ -452,22 +452,24 @@ def commit_point_run_cas(
     """
     init_schema()
     payload = dict(run)
-    for key in ("_run_id", "_state_version", "_lifecycle_generation", "_lifecycle_state"):
+    for key in ("_run_id", "_state_version", "_lifecycle_generation", "_lifecycle_state", "_point_last_batch"):
         payload.pop(key, None)
     rows = projection_rows or []
     keys = [str(row["key"]) for row in rows]
     if len(keys) != len(set(keys)):
         raise ValueError("duplicate Point projection key")
-    batch_json = json.dumps(rows, separators=(",", ":"), sort_keys=True, allow_nan=False)
-    batch_id = hashlib.sha256(batch_json.encode("utf-8")).hexdigest()
+    batch_id = _point_batch_id(payload, rows, int(expected_version) + 1, int(expected_generation))
+
+    def _select_current(conn):
+        return conn.execute(
+            "SELECT state_version, lifecycle_generation, lifecycle_state, run_json "
+            "FROM live_runs WHERE run_id = ?",
+            (run_id,),
+        ).fetchone()
 
     def _op() -> str:
         with _connect() as conn:
-            current = conn.execute(
-                "SELECT state_version, lifecycle_generation, lifecycle_state, run_json "
-                "FROM live_runs WHERE run_id = ?",
-                (run_id,),
-            ).fetchone()
+            current = _select_current(conn)
             if current is None:
                 return "conflict"
             existing = {
@@ -478,14 +480,17 @@ def commit_point_run_cas(
                 ).fetchall()
             }
 
-            def _exact_completion() -> bool:
-                # The durable batch marker identifies the exact submission that
-                # advanced this version, including an empty batch. Projection
-                # adjacency alone cannot distinguish retries from later commits.
-                if current["state_version"] != int(expected_version) + 1:
+            def _exact_completion(row) -> bool:
+                # The durable batch marker identifies the exact committed state
+                # that advanced this version: the run snapshot and its sorted
+                # projection rows (R7-03), so two different samples -- two
+                # empty ones included -- never share it, and the same rows in
+                # another order are still the same commit. Projection adjacency
+                # alone cannot distinguish retries from later commits.
+                if row is None or row["state_version"] != int(expected_version) + 1:
                     return False
                 try:
-                    stored_run = json.loads(current["run_json"])
+                    stored_run = json.loads(row["run_json"])
                 except (TypeError, ValueError):
                     return False
                 return stored_run.get("_point_last_batch") == {
@@ -498,7 +503,7 @@ def commit_point_run_cas(
                 or current["lifecycle_generation"] != expected_generation
                 or current["lifecycle_state"] != "active"
             ):
-                return "already_committed" if _exact_completion() else "conflict"
+                return "already_committed" if _exact_completion(current) else "conflict"
             # Do the conditional UPDATE FIRST. If another writer won the version race
             # between the SELECT above and here, rowcount is 0 and we return before
             # inserting any projection rows — otherwise the rows would be committed by
@@ -518,7 +523,9 @@ def commit_point_run_cas(
                 ),
             )
             if cursor.rowcount != 1:
-                return "already_committed" if _exact_completion() else "conflict"
+                # Another writer changed the row after the SELECT above: decide
+                # on the row as it is now, not on the one read before the UPDATE.
+                return "already_committed" if _exact_completion(_select_current(conn)) else "conflict"
             now_iso = isoformat_z(utc_now())
             for row in rows:
                 conn.execute(
@@ -529,6 +536,17 @@ def commit_point_run_cas(
             return "committed"
 
     return str(_with_retry(_op))
+
+
+def _point_batch_id(payload: dict[str, Any], rows: list[dict[str, Any]], version: int, generation: int) -> str:
+    """Identity of one Point commit: the version and generation it creates, the
+    run snapshot it writes, and its projection rows in key order."""
+    ordered = sorted(rows, key=lambda row: str(row["key"]))
+    # Non-finite numbers in a projection row are refused, as before (allow_nan).
+    rows_json = json.dumps(ordered, separators=(",", ":"), sort_keys=True, allow_nan=False)
+    run_json = json.dumps(payload, separators=(",", ":"), sort_keys=True, default=str)
+    encoded = json.dumps([version, generation, run_json, rows_json], separators=(",", ":"))
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 
 def retrieve_point_projection_rows(run_id: str) -> list[dict[str, Any]]:
