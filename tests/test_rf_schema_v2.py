@@ -60,7 +60,8 @@ def test_convert_v1_positive_finite_non_boolean_data_rate_enables_link(value):
 
 
 @pytest.mark.parametrize(
-    "value", [None, "", 0, -1, True, False, "abc", float("inf"), float("nan")]
+    "value",
+    [None, "", 0, -1, True, False, "abc", float("inf"), float("nan"), 10**400],
 )
 def test_convert_v1_other_data_rates_disable_link(value):
     converted, result = convert_rf_block(

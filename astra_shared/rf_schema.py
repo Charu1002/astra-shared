@@ -56,7 +56,7 @@ def _legacy_data_rate_enables_link(value: Any) -> bool:
         return False
     try:
         numeric = float(value)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return False
     return math.isfinite(numeric) and numeric > 0
 
