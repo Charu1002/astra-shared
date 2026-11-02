@@ -25,6 +25,29 @@ class RfConfigError(ValueError):
     """Raised when RF conversion, persistence, or run validation fails."""
 
 
+class RfParamParseError(ValueError):
+    """A typed RF request parsing error with stable, user-facing codes."""
+
+    def __init__(self, message: str, *, codes: tuple[str, ...] | list[str]):
+        if not codes or any(not isinstance(code, str) or not code for code in codes):
+            raise ValueError("RfParamParseError requires at least one error code")
+        super().__init__(message)
+        self.codes = list(codes)
+
+
+class RfKeyError(RfParamParseError, RfConfigError):
+    """A key-specific RF error usable by both saved-config and route callers."""
+
+    def __init__(self, message: str, *, key: str, code: str):
+        if not isinstance(key, str) or not key:
+            raise ValueError("RfKeyError requires a non-empty RF key")
+        if not isinstance(code, str) or not code:
+            raise ValueError("RfKeyError requires a non-empty error code")
+        self.key = key
+        self.code = code
+        super().__init__(message, codes=[code])
+
+
 @dataclass(frozen=True)
 class RfConversion:
     source_version: int
@@ -66,19 +89,32 @@ def convert_rf_block(
 ) -> tuple[dict[str, Any], RfConversion]:
     """Return a clean Version 2 copy and an explicit conversion result."""
     converted = dict(block)
-    source_version = _require_version(converted)
+    try:
+        source_version = _require_version(converted)
+    except ValueError as exc:
+        raise RfKeyError(
+            str(exc),
+            key="rf_schema_version",
+            code="rf_schema_version_invalid",
+        ) from exc
 
     if source_version == 2:
         if "data_rate_bps" in converted:
-            raise RfConfigError(
-                "data_rate_bps is not a key of rf_schema_version 2; remove it"
+            raise RfKeyError(
+                "data_rate_bps is not a key of rf_schema_version 2; remove it",
+                key="data_rate_bps",
+                code="data_rate_bps_not_v2_key",
             )
         digital_link = parse_bool_value(converted.get("digital_link"), False)
         return converted, RfConversion(2, 2, False, digital_link)
 
     for key in _VERSION_2_ONLY_KEYS:
         if key in converted:
-            raise RfConfigError(f"{key} is not a key of rf_schema_version 1")
+            raise RfKeyError(
+                f"{key} is not a key of rf_schema_version 1",
+                key=key,
+                code=f"{key}_not_v1_key",
+            )
 
     digital_link = _legacy_data_rate_enables_link(converted.get("data_rate_bps"))
     converted.pop("data_rate_bps", None)
@@ -94,12 +130,22 @@ def complete_saved_rf_keys(block: Mapping[str, Any]) -> dict[str, Any]:
     try:
         version = _require_version(completed)
     except ValueError as exc:
-        raise RfConfigError(str(exc)) from exc
+        raise RfKeyError(
+            str(exc),
+            key="rf_schema_version",
+            code="rf_schema_version_invalid",
+        ) from exc
     if version != RF_SCHEMA_VERSION:
-        raise RfConfigError("saved RF block must use rf_schema_version 2")
+        raise RfKeyError(
+            "saved RF block must use rf_schema_version 2",
+            key="rf_schema_version",
+            code="rf_schema_version_not_v2",
+        )
     if "data_rate_bps" in completed:
-        raise RfConfigError(
-            "data_rate_bps is not a key of rf_schema_version 2; remove it"
+        raise RfKeyError(
+            "data_rate_bps is not a key of rf_schema_version 2; remove it",
+            key="data_rate_bps",
+            code="data_rate_bps_not_v2_key",
         )
 
     defaults = {

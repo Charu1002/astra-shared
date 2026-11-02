@@ -7,6 +7,8 @@ from astra_shared.param_parsing import parse_rf_params
 from astra_shared.rf_schema import (
     RF_SCHEMA_VERSION,
     RfConfigError,
+    RfKeyError,
+    RfParamParseError,
     complete_saved_rf_keys,
     convert_rf_block,
 )
@@ -224,6 +226,68 @@ def test_parser_preserves_finite_unused_overhead_when_link_off():
 def test_parser_names_code_rate_for_non_numeric_value():
     with pytest.raises(RfConfigError, match=r"^code_rate must be one of:"):
         parse_rf_params(_rf(code_rate="abc"))
+
+
+def test_key_specific_rf_error_is_both_config_and_typed_parser_error():
+    error = RfKeyError(
+        "shannon_attenuation_factor must be in (0, 1]",
+        key="shannon_attenuation_factor",
+        code="shannon_attenuation_factor_invalid",
+    )
+
+    assert isinstance(error, RfConfigError)
+    assert isinstance(error, RfParamParseError)
+    assert error.codes == ["shannon_attenuation_factor_invalid"]
+
+
+def test_parser_collects_multiple_automatic_mcs_errors_without_raising():
+    parsed = parse_rf_params(
+        _rf(
+            digital_link=True,
+            mcs_selection="auto",
+            shannon_attenuation_factor=5,
+            data_rate_bps=None,
+        ),
+        collect_errors=True,
+    )
+
+    assert parsed["parser_errors"] == [
+        "data_rate_bps_not_v2_key",
+        "shannon_attenuation_factor_invalid",
+    ]
+    assert parsed["digital_link"] is True
+    assert parsed["mcs_selection"] == "auto"
+    assert parsed["shannon_attenuation_factor"] == 0.6
+
+
+@pytest.mark.parametrize(
+    ("payload", "expected_code"),
+    [
+        (
+            {
+                "rf_schema_version": 1,
+                "clutter_mode": "disabled",
+                "mcs_selection": "auto",
+            },
+            "mcs_selection_not_v1_key",
+        ),
+        (
+            _rf(digital_link=True, overhead_percent=50),
+            "overhead_percent_invalid",
+        ),
+        (
+            _rf(bandwidth_mhz=0),
+            "bandwidth_mhz_invalid",
+        ),
+    ],
+)
+def test_collect_mode_returns_stable_codes_and_never_uses_backstop(
+    payload, expected_code
+):
+    parsed = parse_rf_params(payload, collect_errors=True)
+
+    assert parsed["parser_errors"] == [expected_code]
+    assert "rf_config_invalid" not in parsed["parser_errors"]
 
 
 @pytest.mark.parametrize(

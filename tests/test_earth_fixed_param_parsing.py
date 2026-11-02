@@ -27,6 +27,17 @@ def test_defaults_preserve_nadir_behavior_and_path_elevation_defaults():
     assert parse_rf_params({})["targets"] == []
 
 
+def test_highest_cn_is_a_supported_earth_fixed_assignment_rule():
+    parsed = parse_rf_params(
+        {
+            "pointing_mode": "earth_fixed",
+            "assignment_rule": "highest_cn",
+            "targets": [target()],
+        }
+    )
+    assert parsed["assignment_rule"] == "highest_cn"
+
+
 @pytest.mark.parametrize("value, expected", [
     ("nadir", "nadir"),
     ("earth_moving", "nadir"),

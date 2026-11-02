@@ -25,6 +25,8 @@ from .rf_schema import (
     DEFAULT_OVERHEAD_PERCENT,
     DEFAULT_SHANNON_ATTENUATION_FACTOR,
     RfConfigError,
+    RfKeyError,
+    RfParamParseError,
     convert_rf_block,
     parse_bool_value,
 )
@@ -225,7 +227,11 @@ def _parse_max_gain_dbi(params: dict, antenna_model: str) -> float:
 def _parse_modulation(params: dict) -> str:
     modulation = str(params.get("modulation") or DEFAULT_MODULATION).strip().upper()
     if modulation not in MODULATIONS:
-        raise RfConfigError(f"Unsupported modulation: {modulation}")
+        raise RfKeyError(
+            f"Unsupported modulation: {modulation}",
+            key="modulation",
+            code="invalid_modulation",
+        )
     return modulation
 
 
@@ -236,12 +242,20 @@ def _parse_code_rate(params: dict) -> float:
     try:
         value = float(raw)
     except (TypeError, ValueError, OverflowError) as exc:
-        raise RfConfigError(f"code_rate must be one of: {VALID_CODE_RATE_LABELS}") from exc
+        raise RfKeyError(
+            f"code_rate must be one of: {VALID_CODE_RATE_LABELS}",
+            key="code_rate",
+            code="code_rate_invalid",
+        ) from exc
     if not any(
         math.isclose(value, allowed, rel_tol=0.0, abs_tol=1.0e-9)
         for allowed in VALID_CODE_RATES
     ):
-        raise RfConfigError(f"code_rate must be one of: {VALID_CODE_RATE_LABELS}")
+        raise RfKeyError(
+            f"code_rate must be one of: {VALID_CODE_RATE_LABELS}",
+            key="code_rate",
+            code="code_rate_invalid",
+        )
     return value
 
 
@@ -254,7 +268,11 @@ def _parse_mcs_selection(params: dict) -> str:
     if raw in (None, ""):
         return "fixed"
     if raw not in ("fixed", "auto"):
-        raise RfConfigError("mcs_selection must be fixed or auto")
+        raise RfKeyError(
+            "mcs_selection must be fixed or auto",
+            key="mcs_selection",
+            code="mcs_selection_invalid",
+        )
     return raw
 
 
@@ -266,23 +284,24 @@ def _parse_conditional_number(
     used: bool,
     valid,
     error: str,
+    code: str,
 ) -> float:
     raw = params.get(key, default)
     if raw in (None, ""):
         raw = default
     if isinstance(raw, bool):
         if used:
-            raise RfConfigError(error)
+            raise RfKeyError(error, key=key, code=code)
         return default
     try:
         value = float(raw)
     except (TypeError, ValueError, OverflowError):
         if used:
-            raise RfConfigError(error)
+            raise RfKeyError(error, key=key, code=code)
         return default
     if not math.isfinite(value) or not valid(value):
         if used:
-            raise RfConfigError(error)
+            raise RfKeyError(error, key=key, code=code)
         # Hidden, unused values remain part of the saved project.  Preserve
         # finite values so a Fixed/link-off replay does not rewrite them.
         if math.isfinite(value):
@@ -302,13 +321,25 @@ def _resolve_bandwidth_hz(params: dict) -> float:
         return float(DEFAULT_BANDWIDTH_HZ)
     raw = params[key]
     if isinstance(raw, bool):
-        raise RfConfigError(f"{key} must be a positive finite number")
+        raise RfKeyError(
+            f"{key} must be a positive finite number",
+            key=key,
+            code=f"{key}_invalid",
+        )
     try:
         value = float(raw) * multiplier
     except (TypeError, ValueError, OverflowError) as exc:
-        raise RfConfigError(f"{key} must be a positive finite number") from exc
+        raise RfKeyError(
+            f"{key} must be a positive finite number",
+            key=key,
+            code=f"{key}_invalid",
+        ) from exc
     if not math.isfinite(value) or value <= 0:
-        raise RfConfigError(f"{key} must be a positive finite number")
+        raise RfKeyError(
+            f"{key} must be a positive finite number",
+            key=key,
+            code=f"{key}_invalid",
+        )
     return value
 
 
@@ -414,17 +445,166 @@ def _parse_pfd_params(
     return compute_pfd, None, None, None, pfd_ref_bw_hz
 
 
+def _normalize_pointing_mode(value: str | None) -> tuple[str, str | None]:
+    raw = str(value or "nadir").strip().lower().replace("-", "_")
+    if raw in {"nadir", "earth_moving"}:
+        return "nadir", None
+    if raw in {"earth_fixed", "targeted"}:
+        return "earth_fixed", None
+    return "nadir", "invalid_pointing_mode"
+
+
+def _normalize_assignment_rule(value: str | None) -> tuple[str, str | None]:
+    raw = str(value or "highest_elevation").strip().lower()
+    # ``highest_cn`` remains a supported Earth-Fixed assignment strategy.  It
+    # probes the dynamic-loss adapters before selecting a target, whereas the
+    # other strategies can be chosen from geometry alone.
+    if raw in {"highest_elevation", "highest_cn", "lowest_range", "nearest"}:
+        return raw, None
+    return "highest_elevation", "invalid_assignment_rule"
+
+
+def _parse_bounded_float(
+    params: dict,
+    key: str,
+    default: float,
+    min_val: float,
+    max_val: float,
+    error_prefix: str,
+) -> tuple[float, str | None]:
+    raw = params.get(key, default)
+    if raw in (None, ""):
+        return default, None
+    try:
+        value = float(raw)
+    except (TypeError, ValueError, OverflowError):
+        return default, f"{error_prefix}_invalid"
+    if not math.isfinite(value):
+        return default, f"{error_prefix}_invalid"
+    if value < min_val or value > max_val:
+        return min(max(value, min_val), max_val), f"{error_prefix}_out_of_range"
+    return value, None
+
+
+def _parse_min_elevation_deg(params: dict, default: float) -> tuple[float, str | None]:
+    key = "min_elevation_deg" if params.get("min_elevation_deg") not in (None, "") else "min_el_deg"
+    return _parse_bounded_float(params, key, default, 0.0, 90.0, key)
+
+
+def _canonicalize_targets(params: dict, errors: list[str]) -> list[dict]:
+    canonical_sources: list[list[dict]] = []
+    for source_key in ("targets", "targets_json"):
+        raw = params.get(source_key)
+        if raw in (None, ""):
+            continue
+        if source_key == "targets_json":
+            try:
+                raw = json.loads(raw)
+            except (TypeError, ValueError, json.JSONDecodeError):
+                errors.append("invalid_targets_json")
+                continue
+        if not isinstance(raw, list):
+            errors.append("targets_not_list")
+            continue
+        canonical: list[dict] = []
+        used_ids: set[str] = set()
+        explicit_ids = {
+            str(row.get("target_id")).strip()
+            for row in raw
+            if isinstance(row, dict)
+            and row.get("target_id") is not None
+            and str(row.get("target_id")).strip()
+        }
+        for index, row in enumerate(raw):
+            if not isinstance(row, dict):
+                errors.append("target_not_object")
+                continue
+            raw_target_id = row.get("target_id")
+            target_id_supplied = "target_id" in row and raw_target_id is not None
+            target_id = str(raw_target_id).strip() if raw_target_id is not None else ""
+            if target_id_supplied and not target_id:
+                errors.append("target_id_blank")
+                continue
+            if not target_id:
+                next_id = index + 1
+                target_id = f"target-{next_id}"
+                while target_id in used_ids or target_id in explicit_ids:
+                    next_id += 1
+                    target_id = f"target-{next_id}"
+            if target_id in used_ids:
+                errors.append("target_id_duplicate")
+                continue
+            used_ids.add(target_id)
+            try:
+                lat = float(row.get("target_lat"))
+                lon = float(row.get("target_lon"))
+                alt = float(row.get("target_alt_km", 0.0) or 0.0)
+            except (TypeError, ValueError, OverflowError):
+                errors.append("target_lat_invalid")
+                continue
+            if not math.isfinite(lat) or not -90.0 <= lat <= 90.0:
+                errors.append("target_lat_out_of_range" if math.isfinite(lat) else "target_lat_invalid")
+                continue
+            if not math.isfinite(lon) or not -180.0 <= lon <= 180.0:
+                errors.append("target_lon_out_of_range" if math.isfinite(lon) else "target_lon_invalid")
+                continue
+            if not math.isfinite(alt) or alt != 0.0:
+                errors.append("target_altitude_unsupported")
+                continue
+            canonical.append({
+                "target_id": target_id,
+                "label": str(row.get("label") or f"Target-{index + 1}").strip() or f"Target-{index + 1}",
+                "target_lat": lat,
+                "target_lon": lon,
+                "target_alt_km": 0.0,
+            })
+        canonical_sources.append(canonical)
+    if len(canonical_sources) == 2 and canonical_sources[0] != canonical_sources[1]:
+        errors.append("conflicting_targets_sources")
+    return canonical_sources[0] if canonical_sources else []
+
+
+def _parse_data_rate_bps(params: dict) -> float | None:
+    raw = params.get("data_rate_bps")
+    if raw in (None, "", "null"):
+        return None
+    try:
+        value = float(raw)
+    except OverflowError:
+        # Legacy values which cannot be represented as a finite float are
+        # treated as link-off compatibility data, not as an RF error.
+        return None
+    except (TypeError, ValueError) as exc:
+        raise RfKeyError(
+            "data_rate_bps is invalid", key="data_rate_bps", code="data_rate_bps_invalid"
+        ) from exc
+    if not math.isfinite(value) or value <= 0.0:
+        if not math.isfinite(value) and isinstance(raw, int):
+            return None
+        raise RfKeyError(
+            "data_rate_bps must be greater than 0",
+            key="data_rate_bps",
+            code="data_rate_bps_out_of_range",
+        )
+    return value
+
+
 # =============================================================================
 # Unified RF Parameter Parsing
 # =============================================================================
 
 
-def parse_rf_params(params: dict) -> dict:
+def _parse_rf_params(params: dict, *, path_default_min_elevation_deg: float = 5.0) -> dict:
     """Parse RF parameters from any source into a canonical dict.
 
     Accepts form args, config.json, project files, or HTTP request bodies.
     Callers use the subset they need � unused keys are harmless.
     """
+    source_version = params.get("rf_schema_version", 1)
+    if source_version != 2 and "data_rate_bps" in params:
+        # Validate legacy text/finite values, while preserving the compatibility
+        # rule that an unrepresentably large legacy integer means link-off.
+        _parse_data_rate_bps(params)
     params, _conversion = convert_rf_block(params)
 
     if params.get("frequency_ghz") not in (None, "") or params.get("frequency") not in (
@@ -474,7 +654,49 @@ def parse_rf_params(params: dict) -> dict:
         _get_str(params, "antenna_model", "gaussian")
     )
 
+    earth_fixed_errors: list[str] = []
+    pointing_mode, pointing_error = _normalize_pointing_mode(params.get("pointing_mode"))
+    if pointing_error:
+        earth_fixed_errors.append(pointing_error)
+    assignment_rule, assignment_error = _normalize_assignment_rule(params.get("assignment_rule"))
+    if assignment_error:
+        earth_fixed_errors.append(assignment_error)
+    max_steer_deg, max_steer_error = _parse_bounded_float(
+        params, "max_steer_deg", 60.0, 0.0, 90.0, "max_steer_deg"
+    )
+    if max_steer_error:
+        earth_fixed_errors.append(max_steer_error)
+    min_elevation_deg, min_elevation_error = _parse_min_elevation_deg(
+        params, float(path_default_min_elevation_deg)
+    )
+    if min_elevation_error:
+        earth_fixed_errors.append(min_elevation_error)
+    for elevation_key in ("min_elevation_deg", "min_el_deg"):
+        if params.get(elevation_key) not in (None, ""):
+            _, alias_error = _parse_bounded_float(
+                params, elevation_key, float(path_default_min_elevation_deg), 0.0, 90.0, elevation_key
+            )
+            if alias_error and alias_error not in earth_fixed_errors:
+                earth_fixed_errors.append(alias_error)
+    if "debug_target_reachability" in params:
+        earth_fixed_errors.append("debug_target_reachability_not_public")
+    targets = _canonicalize_targets(params, earth_fixed_errors)
+    if pointing_mode == "earth_fixed" and not targets:
+        earth_fixed_errors.append("earth_fixed_targets_required")
+    if pointing_mode == "earth_fixed" and antenna_model == "phased_array":
+        earth_fixed_errors.append("earth_fixed_phased_array_unsupported")
+    if pointing_mode != "earth_fixed" and not pointing_error:
+        earth_fixed_errors = []
+        min_elevation_deg = _get_float(
+            params,
+            "min_elevation_deg" if params.get("min_elevation_deg") not in (None, "") else "min_el_deg",
+            float(path_default_min_elevation_deg),
+            min_val=0.0,
+            max_val=90.0,
+        )
+
     digital_link = _parse_bool(params, "digital_link", False)
+    _parse_data_rate_bps(params)
     mcs_selection = _parse_mcs_selection(params)
     shannon_attenuation_factor = _parse_conditional_number(
         params,
@@ -483,6 +705,7 @@ def parse_rf_params(params: dict) -> dict:
         used=digital_link and mcs_selection == "auto",
         valid=lambda value: 0 < value <= 1,
         error="shannon_attenuation_factor must be in (0, 1]",
+        code="shannon_attenuation_factor_invalid",
     )
     overhead_percent = _parse_conditional_number(
         params,
@@ -491,22 +714,33 @@ def parse_rf_params(params: dict) -> dict:
         used=digital_link,
         valid=lambda value: 0 <= value < 50,
         error="overhead_percent must be in [0, 50)",
+        code="overhead_percent_invalid",
     )
     modulation = _parse_modulation(params)
     code_rate = _parse_code_rate(params)
-    compute_pfd, pfd_limit_band, pfd_l0_dbw_m2, pfd_l25_dbw_m2, pfd_ref_bw_hz = (
-        _parse_pfd_params(params)
-    )
-    pfd_checks = _pfd_checks_for_band(
+    try:
+        compute_pfd, pfd_limit_band, pfd_l0_dbw_m2, pfd_l25_dbw_m2, pfd_ref_bw_hz = (
+            _parse_pfd_params(params)
+        )
+    except ValueError as exc:
+        raise RfKeyError(
+            str(exc), key="pfd_limit_band", code="pfd_limit_band_invalid"
+        ) from exc
+    try:
+        pfd_checks = _pfd_checks_for_band(
         pfd_limit_band,
         pfd_l0_dbw_m2,
         pfd_l25_dbw_m2,
         pfd_ref_bw_hz,
-    )
+        )
+    except ValueError as exc:
+        raise RfKeyError(
+            str(exc), key="pfd_limit_band", code="pfd_limit_band_invalid"
+        ) from exc
 
     clutter_rf = normalize_clutter_rf(params)
 
-    return {
+    parsed = {
         "eirp_dbw": _parse_eirp(params),
         "rx_gain_dbi": _get_float(
             params, "rx_gain_dbi", _get_float(params, "rx_gain", DEFAULT_RX_GAIN_DBI)
@@ -566,4 +800,76 @@ def parse_rf_params(params: dict) -> dict:
         "pfd_l25_dbw_m2": pfd_l25_dbw_m2,
         "pfd_checks": pfd_checks,
         "min_el_deg": _get_float(params, "min_el_deg", 5.0, min_val=0.0, max_val=90.0),
+        "min_elevation_deg": min_elevation_deg,
+        "pointing_mode": pointing_mode,
+        "assignment_rule": assignment_rule,
+        "max_steer_deg": max_steer_deg,
+        "targets": targets,
     }
+    if earth_fixed_errors:
+        raise RfParamParseError("Invalid RF request parameters", codes=earth_fixed_errors)
+    return parsed
+
+
+def parse_rf_params(
+    params: dict,
+    *,
+    path_default_min_elevation_deg: float = 5.0,
+    collect_errors: bool = False,
+) -> dict:
+    """Parse RF parameters and optionally collect key-specific parser errors.
+
+    Normal callers keep the existing exception-based API.  Collected callers
+    receive a complete, safe RF dictionary plus ``parser_errors`` so that a
+    route can report every invalid key in one typed validation envelope.
+    """
+    if not collect_errors:
+        return _parse_rf_params(
+            params, path_default_min_elevation_deg=path_default_min_elevation_deg
+        )
+
+    working = dict(params)
+    parser_errors: list[str] = []
+    for _ in range(32):
+        try:
+            parsed = _parse_rf_params(
+                working, path_default_min_elevation_deg=path_default_min_elevation_deg
+            )
+        except RfKeyError as exc:
+            parser_errors.extend(code for code in exc.codes if code not in parser_errors)
+            # Drop only the bad value.  Keeping the remaining Version 2 keys is
+            # essential: otherwise one conflict can hide later MCS errors.
+            working.pop(exc.key, None)
+            continue
+        except RfParamParseError as exc:
+            parser_errors.extend(code for code in exc.codes if code not in parser_errors)
+            # Earth-Fixed validation may report several codes at once.  Remove
+            # the offending Earth-Fixed inputs before retrying collection mode.
+            for key in ("pointing_mode", "assignment_rule", "max_steer_deg", "min_elevation_deg", "min_el_deg", "targets", "targets_json", "debug_target_reachability"):
+                if key in working:
+                    working.pop(key, None)
+            continue
+        except RfConfigError:
+            # RF validation exposed through request parsing must always name a
+            # field.  Do not turn a future non-key-specific programming error
+            # into a generic, un-actionable route response.
+            raise
+        else:
+            # Keep the Earth-Fixed parser's established public key while also
+            # exposing the clearer name used by the Automatic MCS route.
+            parsed["rf_param_errors"] = parser_errors
+            parsed["parser_errors"] = parser_errors
+            return parsed
+
+    if not parser_errors:
+        raise RuntimeError("RF parser collection exhausted without a key-specific error")
+
+    # A collected request error still returns a normalized RF dictionary, but
+    # only together with the concrete key-specific codes that caused it.
+    fallback = _parse_rf_params(
+        {"rf_schema_version": 2, "clutter_mode": "disabled"},
+        path_default_min_elevation_deg=path_default_min_elevation_deg,
+    )
+    fallback["rf_param_errors"] = parser_errors
+    fallback["parser_errors"] = parser_errors
+    return fallback
