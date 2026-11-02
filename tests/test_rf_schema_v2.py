@@ -3,6 +3,7 @@ import math
 import pytest
 
 from astra_shared.clutter_config import ClutterConfigError, _require_version
+from astra_shared.earth_fixed_validation import validation_error_detail
 from astra_shared.param_parsing import parse_rf_params
 from astra_shared.rf_schema import (
     RF_SCHEMA_VERSION,
@@ -90,10 +91,81 @@ def test_convert_v1_other_data_rates_disable_link(value):
     ],
 )
 def test_convert_v1_rejects_v2_only_keys(key):
-    with pytest.raises(RfConfigError, match=rf"^{key} is not a key of rf_schema_version 1$"):
+    with pytest.raises(
+        RfConfigError, match=rf"^{key} is not a key of rf_schema_version 1$"
+    ):
         convert_rf_block(
             {"rf_schema_version": 1, "clutter_mode": "disabled", key: None}
         )
+
+
+@pytest.mark.parametrize(
+    "key,value",
+    [
+        ("digital_link", True),
+        ("mcs_selection", "auto"),
+        ("shannon_attenuation_factor", 0.6),
+        ("overhead_percent", 5),
+    ],
+)
+def test_v1_only_key_errors_are_registered_with_their_key(key, value):
+    with pytest.raises(RfKeyError) as raised:
+        parse_rf_params(
+            {"rf_schema_version": 1, "clutter_mode": "disabled", key: value}
+        )
+
+    assert raised.value.key == key
+    assert validation_error_detail(raised.value.code)["field"] == key
+
+
+@pytest.mark.parametrize(
+    "key,value,expected_code",
+    [
+        ("bandwidth_mhz", "bad", "bandwidth_mhz_invalid"),
+        ("bandwidth_hz", "bad", "bandwidth_hz_invalid"),
+    ],
+)
+def test_bandwidth_errors_are_registered_with_their_key(key, value, expected_code):
+    with pytest.raises(RfKeyError) as raised:
+        parse_rf_params(_rf(**{key: value}))
+
+    assert raised.value.code == expected_code
+    assert validation_error_detail(expected_code)["field"] == key
+
+
+@pytest.mark.parametrize(
+    "payload,expected_code",
+    [
+        (_rf(compute_pfd=True, pfd_ref_bw_hz="bad"), "pfd_ref_bw_hz_invalid"),
+        (_rf(compute_pfd=True, pfd_ref_bw_hz=0), "pfd_ref_bw_hz_out_of_range"),
+        (
+            _rf(
+                compute_pfd=True,
+                pfd_limit_band="custom",
+                pfd_l0_dbw_m2="bad",
+                pfd_l25_dbw_m2=-100,
+            ),
+            "pfd_custom_limit_invalid",
+        ),
+    ],
+)
+def test_pfd_errors_keep_their_specific_error_code(payload, expected_code):
+    with pytest.raises(RfKeyError) as raised:
+        parse_rf_params(payload)
+
+    assert raised.value.code == expected_code
+
+
+def test_overhead_message_uses_the_actual_upper_bound():
+    assert "< 50" in validation_error_detail("overhead_percent_invalid")["message"]
+
+
+@pytest.mark.parametrize("value", [0, -1, "abc", "inf", 10**400])
+def test_v1_non_positive_or_unparseable_data_rate_means_link_off(value):
+    parsed = parse_rf_params(
+        {"rf_schema_version": 1, "clutter_mode": "disabled", "data_rate_bps": value}
+    )
+    assert parsed["digital_link"] is False
 
 
 def test_convert_v2_is_unchanged_and_reports_no_conversion():
@@ -131,6 +203,20 @@ def test_complete_saved_rf_keys_fills_only_missing_values_and_normalizes_boolean
     assert completed["mcs_selection"] == "fixed"
     assert completed["modulation"] == "QPSK"
     assert completed["code_rate"] == 1
+    assert completed["shannon_attenuation_factor"] == 0.6
+    assert completed["overhead_percent"] == 0
+
+
+def test_complete_saved_rf_keys_treats_null_strings_as_missing_values():
+    completed = complete_saved_rf_keys(
+        _rf(
+            mcs_selection="null",
+            shannon_attenuation_factor="null",
+            overhead_percent="null",
+        )
+    )
+
+    assert completed["mcs_selection"] == "fixed"
     assert completed["shannon_attenuation_factor"] == 0.6
     assert completed["overhead_percent"] == 0
 
@@ -181,8 +267,18 @@ def test_parser_null_or_empty_mode_defaults_to_fixed(value):
     assert parse_rf_params(_rf(mcs_selection=value))["mcs_selection"] == "fixed"
 
 
-@pytest.mark.parametrize("value", ["AUTO", "Fixed", " auto ", 1, False])
-def test_parser_rejects_invalid_mode_even_when_link_is_off(value):
+@pytest.mark.parametrize(
+    "value, expected", [("AUTO", "auto"), ("Fixed", "fixed"), (" auto ", "auto")]
+)
+def test_parser_normalizes_case_insensitive_mode_even_when_link_is_off(value, expected):
+    assert (
+        parse_rf_params(_rf(digital_link=False, mcs_selection=value))["mcs_selection"]
+        == expected
+    )
+
+
+@pytest.mark.parametrize("value", [1, False])
+def test_parser_rejects_non_string_mode_even_when_link_is_off(value):
     with pytest.raises(RfConfigError, match=r"^mcs_selection must be fixed or auto$"):
         parse_rf_params(_rf(digital_link=False, mcs_selection=value))
 
@@ -220,7 +316,12 @@ def test_parser_validates_overhead_only_when_link_on(value):
 
 
 def test_parser_preserves_finite_unused_overhead_when_link_off():
-    assert parse_rf_params(_rf(digital_link=False, overhead_percent=60))["overhead_percent"] == 60
+    assert (
+        parse_rf_params(_rf(digital_link=False, overhead_percent=60))[
+            "overhead_percent"
+        ]
+        == 60
+    )
 
 
 def test_parser_names_code_rate_for_non_numeric_value():
@@ -238,6 +339,7 @@ def test_key_specific_rf_error_is_both_config_and_typed_parser_error():
     assert isinstance(error, RfConfigError)
     assert isinstance(error, RfParamParseError)
     assert error.codes == ["shannon_attenuation_factor_invalid"]
+    assert error.field == "shannon_attenuation_factor"
 
 
 def test_parser_collects_multiple_automatic_mcs_errors_without_raising():

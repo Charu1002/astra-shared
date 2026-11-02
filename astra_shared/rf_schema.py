@@ -20,6 +20,13 @@ _VERSION_2_ONLY_KEYS = (
     "overhead_percent",
 )
 
+_VERSION_1_ONLY_KEY_CODES = {
+    "digital_link": "digital_link_not_v1_key",
+    "mcs_selection": "mcs_selection_not_v1_key",
+    "shannon_attenuation_factor": "shannon_attenuation_factor_not_v1_key",
+    "overhead_percent": "overhead_percent_not_v1_key",
+}
+
 
 class RfConfigError(ValueError):
     """Raised when RF conversion, persistence, or run validation fails."""
@@ -28,11 +35,20 @@ class RfConfigError(ValueError):
 class RfParamParseError(ValueError):
     """A typed RF request parsing error with stable, user-facing codes."""
 
-    def __init__(self, message: str, *, codes: tuple[str, ...] | list[str]):
+    def __init__(
+        self,
+        message: str,
+        *,
+        codes: tuple[str, ...] | list[str],
+        field: str | None = None,
+    ):
         if not codes or any(not isinstance(code, str) or not code for code in codes):
             raise ValueError("RfParamParseError requires at least one error code")
         super().__init__(message)
         self.codes = list(codes)
+        # Keep the field contract used by the UI and route adapters while
+        # allowing aggregate parser errors to remain field-less.
+        self.field = field
 
 
 class RfKeyError(RfParamParseError, RfConfigError):
@@ -45,7 +61,7 @@ class RfKeyError(RfParamParseError, RfConfigError):
             raise ValueError("RfKeyError requires a non-empty error code")
         self.key = key
         self.code = code
-        super().__init__(message, codes=[code])
+        super().__init__(message, codes=[code], field=key)
 
 
 @dataclass(frozen=True)
@@ -113,7 +129,7 @@ def convert_rf_block(
             raise RfKeyError(
                 f"{key} is not a key of rf_schema_version 1",
                 key=key,
-                code=f"{key}_not_v1_key",
+                code=_VERSION_1_ONLY_KEY_CODES[key],
             )
 
     digital_link = _legacy_data_rate_enables_link(converted.get("data_rate_bps"))
@@ -157,7 +173,7 @@ def complete_saved_rf_keys(block: Mapping[str, Any]) -> dict[str, Any]:
         "overhead_percent": DEFAULT_OVERHEAD_PERCENT,
     }
     for key, default in defaults.items():
-        if key not in completed or completed[key] in (None, ""):
+        if key not in completed or completed[key] in (None, "", "null"):
             completed[key] = default
     completed["digital_link"] = parse_bool_value(completed["digital_link"], False)
     completed["rf_schema_version"] = RF_SCHEMA_VERSION

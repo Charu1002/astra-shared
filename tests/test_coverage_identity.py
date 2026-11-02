@@ -19,9 +19,15 @@ def test_coverage_ids_and_manifests_are_deterministic():
 def test_rf_identity_tracks_versioned_clutter_configuration():
     from astra_shared.coverage_identity import build_earth_fixed_rf_identity_v1
 
-    off = build_earth_fixed_rf_identity_v1({"clutter_mode": "disabled", "clutter_percentile": 50.0})
-    p50 = build_earth_fixed_rf_identity_v1({"clutter_mode": "worldcover_p2108_p833", "clutter_percentile": 50.0})
-    p90 = build_earth_fixed_rf_identity_v1({"clutter_mode": "worldcover_p2108_p833", "clutter_percentile": 90.0})
+    off = build_earth_fixed_rf_identity_v1(
+        {"clutter_mode": "disabled", "clutter_percentile": 50.0}
+    )
+    p50 = build_earth_fixed_rf_identity_v1(
+        {"clutter_mode": "worldcover_p2108_p833", "clutter_percentile": 50.0}
+    )
+    p90 = build_earth_fixed_rf_identity_v1(
+        {"clutter_mode": "worldcover_p2108_p833", "clutter_percentile": 90.0}
+    )
     assert off != p50 != p90
     assert off["clutter_percentile"] is None
     assert "clutter_enable" not in p50
@@ -31,8 +37,44 @@ def test_rf_identity_treats_null_min_elevation_deg_as_not_supplied():
     from astra_shared.coverage_identity import build_earth_fixed_rf_identity_v1
 
     legacy = build_earth_fixed_rf_identity_v1({"min_el_deg": 12.0})
-    null_canonical = build_earth_fixed_rf_identity_v1({"min_elevation_deg": None, "min_el_deg": 12.0})
+    null_canonical = build_earth_fixed_rf_identity_v1(
+        {"min_elevation_deg": None, "min_el_deg": 12.0}
+    )
     canonical = build_earth_fixed_rf_identity_v1({"min_elevation_deg": 12.0})
-    assert legacy["min_elevation_deg"] == null_canonical["min_elevation_deg"] == canonical["min_elevation_deg"] == 12.0
-    both = build_earth_fixed_rf_identity_v1({"min_elevation_deg": 20.0, "min_el_deg": 12.0})
+    assert (
+        legacy["min_elevation_deg"]
+        == null_canonical["min_elevation_deg"]
+        == canonical["min_elevation_deg"]
+        == 12.0
+    )
+    both = build_earth_fixed_rf_identity_v1(
+        {"min_elevation_deg": 20.0, "min_el_deg": 12.0}
+    )
     assert both["min_elevation_deg"] == 20.0
+
+
+def test_rf_identity_tracks_normalized_version_2_digital_link_values():
+    from astra_shared.coverage_identity import build_earth_fixed_rf_identity_v1
+
+    link_off = build_earth_fixed_rf_identity_v1(
+        {"digital_link": False, "mcs_selection": "fixed", "overhead_percent": 0}
+    )
+    auto_alpha_low = build_earth_fixed_rf_identity_v1(
+        {
+            "digital_link": True,
+            "mcs_selection": "auto",
+            "shannon_attenuation_factor": 0.6,
+            "overhead_percent": 14,
+        }
+    )
+    auto_alpha_high = build_earth_fixed_rf_identity_v1(
+        {
+            "digital_link": True,
+            "mcs_selection": "auto",
+            "shannon_attenuation_factor": 1.0,
+            "overhead_percent": 14,
+        }
+    )
+
+    assert link_off != auto_alpha_low != auto_alpha_high
+    assert "data_rate_bps" not in auto_alpha_low
