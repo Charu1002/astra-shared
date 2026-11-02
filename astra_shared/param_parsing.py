@@ -89,6 +89,13 @@ VALID_CODE_RATES = (
     1.0,
 )
 VALID_CODE_RATE_LABELS = "1/4, 1/3, 2/5, 1/2, 3/5, 2/3, 3/4, 4/5, 5/6, 8/9, 9/10, 1"
+# TX antenna peak gain limits in dBi (astra-shared#82). ITU-R S.672 keeps the
+# 10 dBi minimum: its far sidelobe level L_F is fixed at 0 dBi, so below 10 dBi
+# the far sidelobes come within 10 dB of boresight, and rise above boresight
+# once the peak gain is below 0 dBi.
+MAX_GAIN_DBI_MIN = -10.0
+MAX_GAIN_DBI_MAX = 60.0
+S672_MAX_GAIN_DBI_MIN = 10.0
 CUSTOM_PFD_LIMIT_MIN_DBW_M2 = -200.0
 CUSTOM_PFD_LIMIT_MAX_DBW_M2 = 0.0
 PFD_LIMIT_PRESETS = {
@@ -246,6 +253,15 @@ def _normalize_antenna_model(value: str | None) -> str:
     model = str(value or "gaussian").strip().lower()
     allowed = {"gaussian", "bessel", "itu_s672", "phased_array", "custom"}
     return model if model in allowed else "gaussian"
+
+
+def _parse_max_gain_dbi(params: dict, antenna_model: str) -> float:
+    min_val = (
+        S672_MAX_GAIN_DBI_MIN if antenna_model == "itu_s672" else MAX_GAIN_DBI_MIN
+    )
+    return _get_float(
+        params, "max_gain_dbi", 30.0, min_val=min_val, max_val=MAX_GAIN_DBI_MAX
+    )
 
 
 def _parse_modulation(params: dict) -> str:
@@ -673,9 +689,7 @@ def parse_rf_params(
         ),
         "aperture_radius_wl": aperture_radius_wl,
         "aperture_radius_m": aperture_radius_m,
-        "max_gain_dbi": _get_float(
-            params, "max_gain_dbi", 30.0, min_val=10.0, max_val=60.0
-        ),
+        "max_gain_dbi": _parse_max_gain_dbi(params, antenna_model),
         "ln_db": _get_float(params, "ln_db", -20.0),
         "ellipticity_ratio": _get_float(
             params, "ellipticity_ratio", 1.0, min_val=1.0, max_val=3.0
