@@ -201,6 +201,8 @@ def _normalize_phi(
         x = x % 360.0
 
     if out_of_range == "clamp" and not _uses_periodic_phi_cell(phi_grid, policy):
+        if p == "wrap_360" and (x < phi_grid[0] or x > phi_grid[-1]):
+            return _nearest_phi_edge(x, phi_grid)
         return max(phi_grid[0], min(phi_grid[-1], x))
     return x
 
@@ -218,15 +220,37 @@ def _normalize_phi_array(
     elif p != "clamp":
         x = x % 360.0
     if out_of_range == "clamp" and not _uses_periodic_phi_cell(phi_grid, policy):
-        x = np.clip(x, float(phi_grid[0]), float(phi_grid[-1]))
+        if p == "wrap_360":
+            outside = (x < phi_grid[0]) | (x > phi_grid[-1])
+            x = np.where(outside, _nearest_phi_edge_array(x, phi_grid), x)
+        else:
+            x = np.clip(x, float(phi_grid[0]), float(phi_grid[-1]))
     return x
 
 
 def _uses_periodic_phi_cell(phi_grid: Any, policy: str) -> bool:
-    """Whether a grid represents enough of a circular phi domain for seam interpolation."""
+    """Whether the missing circular gap is no larger than the largest phi step."""
     if (policy or "wrap_360").strip().lower() != "wrap_360" or len(phi_grid) < 2:
         return False
-    return float(phi_grid[-1]) - float(phi_grid[0]) >= 180.0 - 1e-9
+    steps = np.diff(np.asarray(phi_grid, dtype=np.float64))
+    gap = 360.0 - float(phi_grid[-1]) + float(phi_grid[0])
+    return gap <= float(np.max(steps)) + 1e-9
+
+
+def _nearest_phi_edge(value: float, phi_grid: list[float]) -> float:
+    first = phi_grid[0]
+    last = phi_grid[-1]
+    first_distance = min(abs(value - first), 360.0 - abs(value - first))
+    last_distance = min(abs(value - last), 360.0 - abs(value - last))
+    return first if first_distance <= last_distance else last
+
+
+def _nearest_phi_edge_array(value: np.ndarray, phi_grid: np.ndarray) -> np.ndarray:
+    first = float(phi_grid[0])
+    last = float(phi_grid[-1])
+    first_distance = np.minimum(np.abs(value - first), 360.0 - np.abs(value - first))
+    last_distance = np.minimum(np.abs(value - last), 360.0 - np.abs(value - last))
+    return np.where(first_distance <= last_distance, first, last)
 
 
 def _bracket_phi_indices(

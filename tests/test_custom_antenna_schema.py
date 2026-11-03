@@ -131,6 +131,20 @@ def test_normalize_warns_when_boresight_is_not_the_pattern_peak():
     assert "boresight_not_pattern_peak" in payload["validation"]["warnings"]
 
 
+def test_normalize_warns_when_phi_coverage_is_limited():
+    payload = normalize_custom_antenna(
+        {
+            "enabled": True,
+            "source_format": "csv",
+            "frequency_hz": 12e9,
+            "psi_deg": [0, 5],
+            "phi_deg": [0, 90],
+            "gain_dbi": [[0, 0], [-5, -10]],
+        }
+    )
+    assert "phi_coverage_limited" in payload["validation"]["warnings"]
+
+
 def test_normalize_rejects_non_monotonic_psi_grid():
     payload = normalize_custom_antenna(
         {

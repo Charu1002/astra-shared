@@ -56,6 +56,50 @@ def test_phi_wrap_360_behavior():
     )
 
 
+def test_open_phi_grid_uses_nearest_edge_for_scalar_and_array():
+    payload = _payload()
+    payload["psi_deg"] = [0.0, 5.0]
+    payload["phi_deg"] = [0.0, 90.0]
+    payload["gain_dbi"] = [[0.0, 0.0], [-5.0, -10.0]]
+
+    assert lookup_custom_gain_db(5.0, 300.0, payload) == pytest.approx(-5.0)
+    result = lookup_custom_gain_db_array([5.0], [300.0], payload)
+    assert result.tolist() == pytest.approx([-5.0])
+
+
+def test_half_plane_phi_grid_uses_first_edge_on_circular_tie():
+    payload = _payload()
+    payload["psi_deg"] = [0.0, 5.0]
+    payload["phi_deg"] = [float(phi) for phi in range(0, 181, 10)]
+    payload["gain_dbi"] = [
+        [-float(psi) * (1.0 + float(phi) / 180.0) for phi in payload["phi_deg"]]
+        for psi in payload["psi_deg"]
+    ]
+
+    assert lookup_custom_gain_db(5.0, 270.0, payload) == pytest.approx(-5.0)
+    assert lookup_custom_gain_db(5.0, 300.0, payload) == pytest.approx(-5.0)
+    result = lookup_custom_gain_db_array([5.0, 5.0], [270.0, 300.0], payload)
+    assert result.tolist() == pytest.approx([-5.0, -5.0])
+
+
+def test_d6_270_degree_phi_grid_is_open_and_uses_nearest_edge():
+    payload = _payload()
+    payload["psi_deg"] = [0.0, 5.0]
+    payload["phi_deg"] = [float(phi) for phi in range(0, 271, 15)]
+    payload["gain_dbi"] = [
+        [float(phi) for phi in payload["phi_deg"]],
+        [float(phi) for phi in payload["phi_deg"]],
+    ]
+
+    # The missing 270-to-360/0 gap is 90 degrees, while the largest table
+    # step is 15 degrees.  Therefore this table is open, despite spanning
+    # more than 180 degrees.
+    assert lookup_custom_gain_db(5.0, 300.0, payload) == pytest.approx(270.0)
+    assert lookup_custom_gain_db(5.0, 315.0, payload) == pytest.approx(0.0)
+    result = lookup_custom_gain_db_array([5.0, 5.0], [300.0, 315.0], payload)
+    assert result.tolist() == pytest.approx([270.0, 0.0])
+
+
 def test_phi_wrap_interpolates_across_periodic_seam_for_scalar_and_array():
     payload = _payload()
     payload["phi_deg"] = [0.0, 90.0, 180.0, 270.0]

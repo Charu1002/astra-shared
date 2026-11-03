@@ -276,5 +276,15 @@ def _validate_shape_and_content(
             warnings.append("sparse_psi_grid")
         if phi_steps and max(phi_steps) > SPARSE_GRID_STEP_DEG:
             warnings.append("sparse_phi_grid")
+        if not _phi_grid_is_closed(phi_deg):
+            warnings.append("phi_coverage_limited")
 
     return errors, warnings
+
+
+def _phi_grid_is_closed(phi_deg: list[float]) -> bool:
+    if len(phi_deg) < 2:
+        return False
+    phi_steps = [phi_deg[i + 1] - phi_deg[i] for i in range(len(phi_deg) - 1)]
+    gap = 360.0 - phi_deg[-1] + phi_deg[0]
+    return gap <= max(phi_steps) + 1e-9
