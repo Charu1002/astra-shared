@@ -173,7 +173,13 @@ def complete_saved_rf_keys(block: Mapping[str, Any]) -> dict[str, Any]:
         "overhead_percent": DEFAULT_OVERHEAD_PERCENT,
     }
     for key, default in defaults.items():
-        if key not in completed or completed[key] in (None, "", "null"):
+        missing = key not in completed or completed[key] in (None, "")
+        # Preserve the literal string "null" for modulation.  Import/save
+        # completion must not silently transform it into QPSK; run parsing
+        # reports the stable invalid_modulation error instead.
+        if key != "modulation":
+            missing = missing or completed.get(key) == "null"
+        if missing:
             completed[key] = default
     completed["digital_link"] = parse_bool_value(completed["digital_link"], False)
     completed["rf_schema_version"] = RF_SCHEMA_VERSION

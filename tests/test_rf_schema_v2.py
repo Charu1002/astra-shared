@@ -211,12 +211,14 @@ def test_complete_saved_rf_keys_treats_null_strings_as_missing_values():
     completed = complete_saved_rf_keys(
         _rf(
             mcs_selection="null",
+            modulation="null",
             shannon_attenuation_factor="null",
             overhead_percent="null",
         )
     )
 
     assert completed["mcs_selection"] == "fixed"
+    assert completed["modulation"] == "null"
     assert completed["shannon_attenuation_factor"] == 0.6
     assert completed["overhead_percent"] == 0
 
@@ -273,7 +275,9 @@ def test_parser_rejects_non_exact_mode_even_when_link_is_off(value):
     # the same rule, so a saved value cannot run on the server but not in the UI.
     with pytest.raises(RfConfigError, match=r"^mcs_selection must be fixed or auto$"):
         parse_rf_params(_rf(digital_link=False, mcs_selection=value))
-    parsed = parse_rf_params(_rf(digital_link=False, mcs_selection=value), collect_errors=True)
+    parsed = parse_rf_params(
+        _rf(digital_link=False, mcs_selection=value), collect_errors=True
+    )
     assert parsed["rf_param_errors"] == ["mcs_selection_invalid"]
 
 
@@ -282,8 +286,12 @@ def test_absent_mode_values_default_to_fixed(value):
     assert parse_rf_params(_rf(mcs_selection=value))["mcs_selection"] == "fixed"
 
 
-def test_modulation_null_string_is_absent():
-    assert parse_rf_params(_rf(modulation="null"))["modulation"] == "QPSK"
+def test_modulation_null_string_is_rejected():
+    with pytest.raises(RfConfigError, match=r"^Unsupported modulation: NULL$"):
+        parse_rf_params(_rf(modulation="null"))
+
+    parsed = parse_rf_params(_rf(modulation="null"), collect_errors=True)
+    assert parsed["rf_param_errors"] == ["invalid_modulation"]
 
 
 def test_collect_mode_reports_one_pfd_error_for_one_bad_custom_limit():

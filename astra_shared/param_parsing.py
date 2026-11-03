@@ -224,7 +224,7 @@ def _parse_max_gain_dbi(params: dict, antenna_model: str) -> float:
 
 def _parse_modulation(params: dict) -> str:
     raw = params.get("modulation")
-    if raw in (None, "", "null"):
+    if raw in (None, ""):
         raw = DEFAULT_MODULATION
     modulation = str(raw or DEFAULT_MODULATION).strip().upper()
     if modulation not in MODULATIONS:
@@ -568,7 +568,10 @@ def _canonicalize_targets(params: dict, errors: list[str]) -> list[dict]:
                 errors.append("target_id_duplicate")
                 continue
             used_ids.add(target_id)
-            label = str(row.get("label") or f"Target-{index + 1}").strip() or f"Target-{index + 1}"
+            label = (
+                str(row.get("label") or f"Target-{index + 1}").strip()
+                or f"Target-{index + 1}"
+            )
             # One conversion per field, so each error names its own field.
             try:
                 lat = float(row.get("target_lat"))
@@ -586,21 +589,31 @@ def _canonicalize_targets(params: dict, errors: list[str]) -> list[dict]:
                 errors.append("target_altitude_unsupported")
                 continue
             if not math.isfinite(lat) or not -90.0 <= lat <= 90.0:
-                errors.append("target_lat_out_of_range" if math.isfinite(lat) else "target_lat_invalid")
+                errors.append(
+                    "target_lat_out_of_range"
+                    if math.isfinite(lat)
+                    else "target_lat_invalid"
+                )
                 continue
             if not math.isfinite(lon) or not -180.0 <= lon <= 180.0:
-                errors.append("target_lon_out_of_range" if math.isfinite(lon) else "target_lon_invalid")
+                errors.append(
+                    "target_lon_out_of_range"
+                    if math.isfinite(lon)
+                    else "target_lon_invalid"
+                )
                 continue
             if not math.isfinite(alt) or alt != 0.0:
                 errors.append("target_altitude_unsupported")
                 continue
-            canonical.append({
-                "target_id": target_id,
-                "label": label,
-                "target_lat": lat,
-                "target_lon": lon,
-                "target_alt_km": 0.0,
-            })
+            canonical.append(
+                {
+                    "target_id": target_id,
+                    "label": label,
+                    "target_lat": lat,
+                    "target_lon": lon,
+                    "target_alt_km": 0.0,
+                }
+            )
         canonical_sources.append(canonical)
 
     if len(canonical_sources) == 2 and canonical_sources[0] != canonical_sources[1]:
@@ -839,7 +852,13 @@ def _parse_rf_params(
 
 
 _PFD_KEYS = frozenset(
-    {"compute_pfd", "pfd_limit_band", "pfd_ref_bw_hz", "pfd_l0_dbw_m2", "pfd_l25_dbw_m2"}
+    {
+        "compute_pfd",
+        "pfd_limit_band",
+        "pfd_ref_bw_hz",
+        "pfd_l0_dbw_m2",
+        "pfd_l25_dbw_m2",
+    }
 )
 # A bad bandwidth key masks the other one only when both are present; drop both
 # so the unused alias is not reported as a second, false error.
