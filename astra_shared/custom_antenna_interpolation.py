@@ -106,7 +106,7 @@ def lookup_custom_gain_db_array(
         return np.zeros_like(psi_arr, dtype=np.float64)
 
     psi_q = np.nan_to_num(psi_arr, nan=0.0, posinf=180.0, neginf=0.0)
-    psi_q = np.clip(psi_q, 0.0, 180.0)
+    psi_q = np.clip(psi_q, float(psi_grid[0]), float(psi_grid[-1]))
     phi_q = _normalize_phi_array(
         phi_arr, phi_grid, policy=phi_policy, out_of_range=out_of_range
     )

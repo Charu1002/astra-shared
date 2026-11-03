@@ -34,6 +34,18 @@ def test_psi_clamp_low_and_high():
     assert lookup_custom_gain_db(999.0, 0.0, payload) == 8.0
 
 
+def test_array_lookup_clamps_psi_to_last_table_row():
+    payload = _payload()
+    payload["psi_deg"] = [float(psi) for psi in range(31)]
+    payload["gain_dbi"] = [[-float(psi), -float(psi)] for psi in range(31)]
+
+    for psi in (45.0, 89.9):
+        assert lookup_custom_gain_db(psi, 0.0, payload) == pytest.approx(-30.0)
+
+    result = lookup_custom_gain_db_array([45.0, 89.9], [0.0, 0.0], payload)
+    assert result.tolist() == pytest.approx([-30.0, -30.0])
+
+
 def test_phi_wrap_360_behavior():
     payload = _payload()
     assert lookup_custom_gain_db(
