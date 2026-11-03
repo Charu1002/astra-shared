@@ -223,7 +223,10 @@ def _parse_max_gain_dbi(params: dict, antenna_model: str) -> float:
 
 
 def _parse_modulation(params: dict) -> str:
-    modulation = str(params.get("modulation") or DEFAULT_MODULATION).strip().upper()
+    raw = params.get("modulation")
+    if raw in (None, "", "null"):
+        raw = DEFAULT_MODULATION
+    modulation = str(raw or DEFAULT_MODULATION).strip().upper()
     if modulation not in MODULATIONS:
         raise RfKeyError(
             f"Unsupported modulation: {modulation}",
@@ -265,14 +268,15 @@ def _parse_mcs_selection(params: dict) -> str:
     raw = params.get("mcs_selection", "fixed")
     if raw in (None, "", "null"):
         return "fixed"
-    value = str(raw).strip().lower()
-    if value not in ("fixed", "auto"):
+    # Plan v6.1 section 2.1: exact match, no case folding or trimming.  The
+    # browser applies the same rule, so a saved value runs identically everywhere.
+    if raw not in ("fixed", "auto"):
         raise RfKeyError(
             "mcs_selection must be fixed or auto",
             key="mcs_selection",
             code="mcs_selection_invalid",
         )
-    return value
+    return raw
 
 
 def _parse_conditional_number(
@@ -470,21 +474,25 @@ def _parse_pfd_params(
 
 
 def _normalize_pointing_mode(value: str | None) -> tuple[str, str | None]:
-    raw = str(value or "nadir").strip().lower().replace("-", "_")
-    if raw in {"nadir", "earth_moving"}:
+    if value is None or value == "":
         return "nadir", None
-    if raw in {"earth_fixed", "targeted"}:
-        return "earth_fixed", None
-    return "nadir", "invalid_pointing_mode"
+    normalized = {
+        "nadir": "nadir",
+        "earth_moving": "nadir",
+        "earth-moving": "nadir",
+        "earth_fixed": "earth_fixed",
+        "earth-fixed": "earth_fixed",
+        "targeted": "earth_fixed",
+    }.get(str(value).strip().lower())
+    return (normalized, None) if normalized else ("nadir", "invalid_pointing_mode")
 
 
 def _normalize_assignment_rule(value: str | None) -> tuple[str, str | None]:
-    raw = str(value or "highest_elevation").strip().lower()
-    # ``highest_cn`` remains a supported Earth-Fixed assignment strategy.  It
-    # probes the dynamic-loss adapters before selecting a target, whereas the
-    # other strategies can be chosen from geometry alone.
-    if raw in {"highest_elevation", "highest_cn", "lowest_range", "nearest"}:
-        return raw, None
+    if value is None or value == "":
+        return "highest_elevation", None
+    normalized = str(value).strip().lower()
+    if normalized in {"highest_elevation", "highest_cn"}:
+        return normalized, None
     return "highest_elevation", "invalid_assignment_rule"
 
 
@@ -496,8 +504,8 @@ def _parse_bounded_float(
     max_val: float,
     error_prefix: str,
 ) -> tuple[float, str | None]:
-    raw = params.get(key, default)
-    if raw in (None, ""):
+    raw = params.get(key)
+    if raw is None or raw == "":
         return default, None
     try:
         value = float(raw)
@@ -506,7 +514,7 @@ def _parse_bounded_float(
     if not math.isfinite(value):
         return default, f"{error_prefix}_invalid"
     if value < min_val or value > max_val:
-        return min(max(value, min_val), max_val), f"{error_prefix}_out_of_range"
+        return default, f"{error_prefix}_out_of_range"
     return value, None
 
 
@@ -520,34 +528,31 @@ def _parse_min_elevation_deg(params: dict, default: float) -> tuple[float, str |
 
 
 def _canonicalize_targets(params: dict, errors: list[str]) -> list[dict]:
-    canonical_sources: list[list[dict]] = []
-    for source_key in ("targets", "targets_json"):
-        raw = params.get(source_key)
-        if raw in (None, ""):
-            continue
-        if source_key == "targets_json":
-            try:
-                raw = json.loads(raw)
-            except (TypeError, ValueError, json.JSONDecodeError):
-                errors.append("invalid_targets_json")
-                continue
-        if not isinstance(raw, list):
+    """Decode and normalize the two supported target input representations."""
+    sources = []
+    if "targets_json" in params and params.get("targets_json") not in (None, ""):
+        try:
+            decoded = params["targets_json"]
+            sources.append(json.loads(decoded) if isinstance(decoded, str) else decoded)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            errors.append("invalid_targets_json")
+    if "targets" in params and params.get("targets") is not None:
+        sources.append(params.get("targets"))
+
+    canonical_sources = []
+    for source in sources:
+        if not isinstance(source, list):
             errors.append("targets_not_list")
             continue
-        canonical: list[dict] = []
         used_ids: set[str] = set()
-        explicit_ids = {
-            str(row.get("target_id")).strip()
-            for row in raw
-            if isinstance(row, dict)
-            and row.get("target_id") is not None
-            and str(row.get("target_id")).strip()
-        }
-        for index, row in enumerate(raw):
+        canonical = []
+        for index, row in enumerate(source):
             if not isinstance(row, dict):
                 errors.append("target_not_object")
                 continue
             raw_target_id = row.get("target_id")
+            # Treat an explicit JSON null as "not supplied" (auto-generate), not as
+            # the literal string "None"; an explicit empty string is still a blank error.
             target_id_supplied = "target_id" in row and raw_target_id is not None
             target_id = str(raw_target_id).strip() if raw_target_id is not None else ""
             if target_id_supplied and not target_id:
@@ -556,48 +561,48 @@ def _canonicalize_targets(params: dict, errors: list[str]) -> list[dict]:
             if not target_id:
                 next_id = index + 1
                 target_id = f"target-{next_id}"
-                while target_id in used_ids or target_id in explicit_ids:
+                while target_id in used_ids:
                     next_id += 1
                     target_id = f"target-{next_id}"
             if target_id in used_ids:
                 errors.append("target_id_duplicate")
                 continue
             used_ids.add(target_id)
+            label = str(row.get("label") or f"Target-{index + 1}").strip() or f"Target-{index + 1}"
+            # One conversion per field, so each error names its own field.
             try:
                 lat = float(row.get("target_lat"))
-                lon = float(row.get("target_lon"))
-                alt = float(row.get("target_alt_km", 0.0) or 0.0)
             except (TypeError, ValueError, OverflowError):
                 errors.append("target_lat_invalid")
                 continue
+            try:
+                lon = float(row.get("target_lon"))
+            except (TypeError, ValueError, OverflowError):
+                errors.append("target_lon_invalid")
+                continue
+            try:
+                alt = float(row.get("target_alt_km", 0.0) or 0.0)
+            except (TypeError, ValueError, OverflowError):
+                errors.append("target_altitude_unsupported")
+                continue
             if not math.isfinite(lat) or not -90.0 <= lat <= 90.0:
-                errors.append(
-                    "target_lat_out_of_range"
-                    if math.isfinite(lat)
-                    else "target_lat_invalid"
-                )
+                errors.append("target_lat_out_of_range" if math.isfinite(lat) else "target_lat_invalid")
                 continue
             if not math.isfinite(lon) or not -180.0 <= lon <= 180.0:
-                errors.append(
-                    "target_lon_out_of_range"
-                    if math.isfinite(lon)
-                    else "target_lon_invalid"
-                )
+                errors.append("target_lon_out_of_range" if math.isfinite(lon) else "target_lon_invalid")
                 continue
             if not math.isfinite(alt) or alt != 0.0:
                 errors.append("target_altitude_unsupported")
                 continue
-            canonical.append(
-                {
-                    "target_id": target_id,
-                    "label": str(row.get("label") or f"Target-{index + 1}").strip()
-                    or f"Target-{index + 1}",
-                    "target_lat": lat,
-                    "target_lon": lon,
-                    "target_alt_km": 0.0,
-                }
-            )
+            canonical.append({
+                "target_id": target_id,
+                "label": label,
+                "target_lat": lat,
+                "target_lon": lon,
+                "target_alt_km": 0.0,
+            })
         canonical_sources.append(canonical)
+
     if len(canonical_sources) == 2 and canonical_sources[0] != canonical_sources[1]:
         errors.append("conflicting_targets_sources")
     return canonical_sources[0] if canonical_sources else []
@@ -609,7 +614,10 @@ def _canonicalize_targets(params: dict, errors: list[str]) -> list[dict]:
 
 
 def _parse_rf_params(
-    params: dict, *, path_default_min_elevation_deg: float = 5.0
+    params: dict,
+    *,
+    path_default_min_elevation_deg: float = 5.0,
+    attach_earth_fixed_errors: bool = False,
 ) -> dict:
     """Parse RF parameters from any source into a canonical dict.
 
@@ -810,7 +818,7 @@ def _parse_rf_params(
         "pfd_l0_dbw_m2": pfd_l0_dbw_m2,
         "pfd_l25_dbw_m2": pfd_l25_dbw_m2,
         "pfd_checks": pfd_checks,
-        "min_el_deg": _get_float(params, "min_el_deg", 5.0, min_val=0.0, max_val=90.0),
+        "min_el_deg": min_elevation_deg,
         "min_elevation_deg": min_elevation_deg,
         "pointing_mode": pointing_mode,
         "assignment_rule": assignment_rule,
@@ -818,10 +826,27 @@ def _parse_rf_params(
         "targets": targets,
     }
     if earth_fixed_errors:
+        if attach_earth_fixed_errors:
+            # Collect mode (R8-S1): report the Earth-Fixed codes but keep the
+            # parsed pointing mode and the valid target rows, as main did, so
+            # callers such as the scalar point fallback still see earth_fixed.
+            parsed["_earth_fixed_errors"] = list(dict.fromkeys(earth_fixed_errors))
+            return parsed
         raise RfParamParseError(
             "Invalid RF request parameters", codes=earth_fixed_errors
         )
     return parsed
+
+
+_PFD_KEYS = frozenset(
+    {"compute_pfd", "pfd_limit_band", "pfd_ref_bw_hz", "pfd_l0_dbw_m2", "pfd_l25_dbw_m2"}
+)
+# A bad bandwidth key masks the other one only when both are present; drop both
+# so the unused alias is not reported as a second, false error.
+_COLLECT_RETRY_DROP = {
+    "bandwidth_mhz": ("bandwidth_mhz", "bandwidth_hz"),
+    "bandwidth_hz": ("bandwidth_mhz", "bandwidth_hz"),
+}
 
 
 def parse_rf_params(
@@ -846,45 +871,41 @@ def parse_rf_params(
     for _ in range(32):
         try:
             parsed = _parse_rf_params(
-                working, path_default_min_elevation_deg=path_default_min_elevation_deg
+                working,
+                path_default_min_elevation_deg=path_default_min_elevation_deg,
+                attach_earth_fixed_errors=True,
             )
         except RfKeyError as exc:
             parser_errors.extend(
                 code for code in exc.codes if code not in parser_errors
             )
-            # Drop only the bad value.  Keeping the remaining Version 2 keys is
-            # essential: otherwise one conflict can hide later MCS errors.
-            working.pop(exc.key, None)
+            # Retry only after dropping the key-specific bad value.  Never drop
+            # Earth-Fixed inputs: their errors are attached, not raised (R8-S1).
+            for key in _COLLECT_RETRY_DROP.get(exc.key, (exc.key,)):
+                working.pop(key, None)
+            if exc.key in _PFD_KEYS:
+                # Parse PFD once: a second pass without the bad key would add a
+                # false "requires both limits" error.
+                working["compute_pfd"] = False
             continue
         except RfParamParseError as exc:
+            # A non key-specific parse error cannot be retried meaningfully.
             parser_errors.extend(
                 code for code in exc.codes if code not in parser_errors
             )
-            # Earth-Fixed validation may report several codes at once.  Remove
-            # the offending Earth-Fixed inputs before retrying collection mode.
-            for key in (
-                "pointing_mode",
-                "assignment_rule",
-                "max_steer_deg",
-                "min_elevation_deg",
-                "min_el_deg",
-                "targets",
-                "targets_json",
-                "debug_target_reachability",
-            ):
-                if key in working:
-                    working.pop(key, None)
-            continue
+            break
         except RfConfigError:
             # RF validation exposed through request parsing must always name a
             # field.  Do not turn a future non-key-specific programming error
             # into a generic, un-actionable route response.
             raise
         else:
+            earth_fixed_errors = parsed.pop("_earth_fixed_errors", [])
+            all_errors = list(dict.fromkeys(parser_errors + earth_fixed_errors))
             # Keep the Earth-Fixed parser's established public key while also
             # exposing the clearer name used by the Automatic MCS route.
-            parsed["rf_param_errors"] = parser_errors
-            parsed["parser_errors"] = parser_errors
+            parsed["rf_param_errors"] = all_errors
+            parsed["parser_errors"] = all_errors
             return parsed
 
     if not parser_errors:

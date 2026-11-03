@@ -45,7 +45,7 @@ class RfParamParseError(ValueError):
         if not codes or any(not isinstance(code, str) or not code for code in codes):
             raise ValueError("RfParamParseError requires at least one error code")
         super().__init__(message)
-        self.codes = list(codes)
+        self.codes = list(dict.fromkeys(codes))
         # Keep the field contract used by the UI and route adapters while
         # allowing aggregate parser errors to remain field-less.
         self.field = field

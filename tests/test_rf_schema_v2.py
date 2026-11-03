@@ -267,14 +267,38 @@ def test_parser_null_or_empty_mode_defaults_to_fixed(value):
     assert parse_rf_params(_rf(mcs_selection=value))["mcs_selection"] == "fixed"
 
 
-@pytest.mark.parametrize(
-    "value, expected", [("AUTO", "auto"), ("Fixed", "fixed"), (" auto ", "auto")]
-)
-def test_parser_normalizes_case_insensitive_mode_even_when_link_is_off(value, expected):
-    assert (
-        parse_rf_params(_rf(digital_link=False, mcs_selection=value))["mcs_selection"]
-        == expected
+@pytest.mark.parametrize("value", ["AUTO", "Auto", "Fixed", " auto ", "fixed "])
+def test_parser_rejects_non_exact_mode_even_when_link_is_off(value):
+    # Plan v6.1 section 2.1: exact match, no case folding.  The browser applies
+    # the same rule, so a saved value cannot run on the server but not in the UI.
+    with pytest.raises(RfConfigError, match=r"^mcs_selection must be fixed or auto$"):
+        parse_rf_params(_rf(digital_link=False, mcs_selection=value))
+    parsed = parse_rf_params(_rf(digital_link=False, mcs_selection=value), collect_errors=True)
+    assert parsed["rf_param_errors"] == ["mcs_selection_invalid"]
+
+
+@pytest.mark.parametrize("value", [None, "", "null"])
+def test_absent_mode_values_default_to_fixed(value):
+    assert parse_rf_params(_rf(mcs_selection=value))["mcs_selection"] == "fixed"
+
+
+def test_modulation_null_string_is_absent():
+    assert parse_rf_params(_rf(modulation="null"))["modulation"] == "QPSK"
+
+
+def test_collect_mode_reports_one_pfd_error_for_one_bad_custom_limit():
+    parsed = parse_rf_params(
+        _rf(pfd_limit_band="custom", pfd_l0_dbw_m2=5, pfd_l25_dbw_m2=-120),
+        collect_errors=True,
     )
+    assert parsed["rf_param_errors"] == ["pfd_custom_limit_out_of_range"]
+
+
+def test_collect_mode_does_not_report_the_unused_bandwidth_alias():
+    parsed = parse_rf_params(
+        _rf(bandwidth_mhz="abc", bandwidth_hz="xyz"), collect_errors=True
+    )
+    assert parsed["rf_param_errors"] == ["bandwidth_mhz_invalid"]
 
 
 @pytest.mark.parametrize("value", [1, False])

@@ -116,7 +116,7 @@ _VALIDATION_MESSAGES = {
         "modulation",
         "Modulation must be one of BPSK, QPSK, OQPSK, 8PSK, 16QAM, 64QAM or 256QAM.",
     ),
-    "mcs_selection_invalid": ("mcs_selection", "MCS selection must be Fixed or Auto."),
+    "mcs_selection_invalid": ("mcs_selection", "mcs_selection must be fixed or auto (lower case)."),
     "digital_link_not_v1_key": (
         "digital_link",
         "digital_link is not valid for RF Schema Version 1.",
