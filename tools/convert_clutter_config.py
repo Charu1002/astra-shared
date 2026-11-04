@@ -61,6 +61,12 @@ def _has_current_version(block: dict[str, Any]) -> bool:
     )
 
 
+def _has_version_two(block: dict[str, Any]) -> bool:
+    return type(block.get("rf_schema_version")) in (int, str) and block.get(
+        "rf_schema_version"
+    ) in (2, "2")
+
+
 def _is_clutter_block(block: dict[str, Any], is_rf_block: bool) -> bool:
     return (
         is_rf_block
@@ -87,6 +93,8 @@ def _validate_converted_block(block: dict[str, Any]) -> None:
 
 def _convert_rf_block(block: dict[str, Any], is_rf_block: bool) -> tuple[bool, bool]:
     if "rf_schema_version" in block:
+        if _has_version_two(block):
+            return False, False
         if not _has_current_version(block):
             raise ConverterError(
                 f"unsupported rf_schema_version {block.get('rf_schema_version')!r}"

@@ -34,6 +34,17 @@ def test_validation_error_has_stable_codes_and_request_envelope():
     assert envelope["errors"][0]["category"] == "request"
 
 
+def test_auto_mcs_rf_errors_identify_the_saved_rf_key():
+    envelope = request_validation_error_envelope(
+        ["shannon_attenuation_factor_invalid", "overhead_percent_invalid"]
+    )
+    assert [detail["field"] for detail in envelope["errors"]] == [
+        "shannon_attenuation_factor",
+        "overhead_percent",
+    ]
+    assert all(detail["category"] == "request" for detail in envelope["errors"])
+
+
 def test_unknown_validation_code_uses_safe_metadata_fallback():
     detail = request_validation_error_envelope(["unknown_code"])["errors"][0]
     assert detail["message"] == "Validation failed."

@@ -15,7 +15,7 @@ from .defaults import (
     DEFAULT_CLUTTER_PERCENTILE,
 )
 
-RF_SCHEMA_VERSION = 1
+RF_SCHEMA_VERSION = 2
 CLUTTER_MODE_DISABLED = ClutterModel.DISABLED.value
 CLUTTER_MODE_WORLDCOVER = ClutterModel.WORLDCOVER_P2108_P833.value
 CLUTTER_MODES = frozenset({CLUTTER_MODE_DISABLED, CLUTTER_MODE_WORLDCOVER})
@@ -165,7 +165,7 @@ def build_clutter_envelope(rf_params: dict[str, Any], tally: ClutterTally | None
 
 
 class ClutterConfigError(ValueError):
-    """Raised when a clutter configuration payload is not version-1 input."""
+    """Raised when a clutter configuration payload has an unsupported version."""
 
 
 def _require_version(rf_params: dict[str, Any]) -> int:
@@ -174,9 +174,9 @@ def _require_version(rf_params: dict[str, Any]) -> int:
         raise ClutterConfigError(
             "rf_schema_version is required; run tools/convert_clutter_config.py on saved RF settings"
         )
-    if type(raw_version) not in (int, str) or raw_version not in (RF_SCHEMA_VERSION, "1"):
+    if type(raw_version) not in (int, str) or raw_version not in (1, "1", 2, "2"):
         raise ClutterConfigError(f"unsupported rf_schema_version {raw_version!r}")
-    return RF_SCHEMA_VERSION
+    return int(raw_version)
 
 
 def _reject_old_fields(rf_params: dict[str, Any]) -> None:
@@ -227,7 +227,7 @@ def _normalize_percentile(rf_params: dict[str, Any], mode: str) -> float | None:
 
 
 def normalize_clutter_rf(rf_params: dict[str, Any]) -> dict[str, Any]:
-    """Normalize the version-1 clutter RF payload fields.
+    """Normalize supported-version clutter RF payload fields.
 
     Spec section 8 item 8 owns all mode resolution. Callers must pass only
     versioned input; old table, fallback and enable fields are rejected by name.
@@ -244,7 +244,7 @@ def normalize_clutter_rf(rf_params: dict[str, Any]) -> dict[str, Any]:
 
 
 def build_clutter_config(rf_params: dict[str, Any]) -> ClutterConfig:
-    """Build a ClutterConfig from normalized version-1 RF payload fields."""
+    """Build a ClutterConfig from normalized RF payload fields."""
     normalized = normalize_clutter_rf(rf_params)
     return ClutterConfig(
         normalized["clutter_mode"],
