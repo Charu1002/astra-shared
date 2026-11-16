@@ -141,9 +141,27 @@ _RF_UNIT_SCALES = {
 }
 
 _RF_INVALID_CODES = {key: f"{key}_invalid" for key in _RF_FLOAT_FIELDS}
-def _reject_nonfinite_rf_inputs(params: dict) -> None:
+
+
+def _active_bandwidth_key(params: dict) -> str | None:
+    if params.get("bandwidth_mhz") not in (None, "", "null"):
+        return "bandwidth_mhz"
+    if params.get("bandwidth_hz") not in (None, "", "null"):
+        return "bandwidth_hz"
+    return None
+
+
+def _reject_nonfinite_rf_inputs(
+    params: dict, *, defer_keys: frozenset[str] = frozenset()
+) -> None:
     """Raise a field-specific error for a non-finite RF input."""
+    active_bandwidth_key = _active_bandwidth_key(params)
     for key in _RF_FLOAT_FIELDS:
+        if key in defer_keys or key == active_bandwidth_key:
+            # The dedicated parser owns the existing field-specific semantics:
+            # bandwidth must say "positive finite", and Earth-Fixed elevation
+            # errors must be collected with the rest of that request's errors.
+            continue
         raw = params.get(key)
         if raw is None or raw == "":
             continue
@@ -710,7 +728,17 @@ def _parse_rf_params(
     Callers use the subset they need � unused keys are harmless.
     """
     params, _conversion = convert_rf_block(params)
-    _reject_nonfinite_rf_inputs(params)
+    pointing_mode, pointing_error = _normalize_pointing_mode(
+        params.get("pointing_mode")
+    )
+    _reject_nonfinite_rf_inputs(
+        params,
+        defer_keys=(
+            frozenset({"min_elevation_deg", "min_el_deg"})
+            if pointing_mode == "earth_fixed"
+            else frozenset()
+        ),
+    )
 
     if params.get("frequency_ghz") not in (None, "") or params.get("frequency") not in (
         None,
@@ -760,9 +788,6 @@ def _parse_rf_params(
     )
 
     earth_fixed_errors: list[str] = []
-    pointing_mode, pointing_error = _normalize_pointing_mode(
-        params.get("pointing_mode")
-    )
     if pointing_error:
         earth_fixed_errors.append(pointing_error)
     assignment_rule, assignment_error = _normalize_assignment_rule(

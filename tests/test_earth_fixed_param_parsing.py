@@ -207,17 +207,47 @@ def test_collect_mode_keeps_valid_target_rows_and_reports_bad_ones():
 
 def test_collect_mode_reports_earth_fixed_and_rf_errors_together():
     parsed = parse_rf_params(
-        {"pointing_mode": "earth_fixed", "targets": [target()], "max_steer_deg": 91, "modulation": "FOO"},
+        {
+            "pointing_mode": "earth_fixed",
+            "targets": [target()],
+            "max_steer_deg": 91,
+            "modulation": "FOO",
+        },
         collect_errors=True,
     )
     assert parsed["pointing_mode"] == "earth_fixed"
-    assert set(parsed["rf_param_errors"]) == {"invalid_modulation", "max_steer_deg_out_of_range"}
+    assert set(parsed["rf_param_errors"]) == {
+        "invalid_modulation",
+        "max_steer_deg_out_of_range",
+    }
+
+
+def test_raise_mode_keeps_other_earth_fixed_errors_with_nonfinite_minimum_elevation():
+    with pytest.raises(RfParamParseError) as caught:
+        parse_rf_params(
+            {
+                "pointing_mode": "earth_fixed",
+                "targets": [],
+                "max_steer_deg": 91,
+                "min_elevation_deg": "nan",
+            }
+        )
+
+    assert set(caught.value.codes) == {
+        "earth_fixed_targets_required",
+        "max_steer_deg_out_of_range",
+        "min_elevation_deg_invalid",
+    }
 
 
 @pytest.mark.parametrize("value", ["nearest", "lowest_range", False, 0])
 def test_unimplemented_or_falsy_assignment_rule_is_rejected(value):
     parsed = parse_rf_params(
-        {"pointing_mode": "earth_fixed", "targets": [target()], "assignment_rule": value},
+        {
+            "pointing_mode": "earth_fixed",
+            "targets": [target()],
+            "assignment_rule": value,
+        },
         collect_errors=True,
     )
     assert "invalid_assignment_rule" in parsed["rf_param_errors"]
@@ -225,7 +255,9 @@ def test_unimplemented_or_falsy_assignment_rule_is_rejected(value):
 
 @pytest.mark.parametrize("value", [False, 0])
 def test_falsy_pointing_mode_is_rejected(value):
-    parsed = parse_rf_params({"pointing_mode": value, "targets": [target()]}, collect_errors=True)
+    parsed = parse_rf_params(
+        {"pointing_mode": value, "targets": [target()]}, collect_errors=True
+    )
     assert "invalid_pointing_mode" in parsed["rf_param_errors"]
 
 
@@ -234,7 +266,10 @@ def test_falsy_pointing_mode_is_rejected(value):
     [
         ({"target_lat": "abc", "target_lon": 1.0}, "target_lat_invalid"),
         ({"target_lat": 0.3, "target_lon": "abc"}, "target_lon_invalid"),
-        ({"target_lat": 0.3, "target_lon": 1.0, "target_alt_km": "abc"}, "target_altitude_unsupported"),
+        (
+            {"target_lat": 0.3, "target_lon": 1.0, "target_alt_km": "abc"},
+            "target_altitude_unsupported",
+        ),
         ({"target_lat": 10**400, "target_lon": 1.0}, "target_lat_invalid"),
         ({"target_lat": 0.3, "target_lon": 10**400}, "target_lon_invalid"),
     ],
@@ -249,7 +284,10 @@ def test_each_target_field_reports_its_own_code(row, code):
 
 def test_targets_json_may_be_an_already_decoded_list():
     parsed = parse_rf_params(
-        {"pointing_mode": "earth_fixed", "targets_json": [target(1, 2, target_id="t1")]},
+        {
+            "pointing_mode": "earth_fixed",
+            "targets_json": [target(1, 2, target_id="t1")],
+        },
         collect_errors=True,
     )
     assert parsed["rf_param_errors"] == []
@@ -257,13 +295,18 @@ def test_targets_json_may_be_an_already_decoded_list():
 
 
 def test_empty_string_targets_is_not_a_list():
-    parsed = parse_rf_params({"pointing_mode": "earth_fixed", "targets": ""}, collect_errors=True)
+    parsed = parse_rf_params(
+        {"pointing_mode": "earth_fixed", "targets": ""}, collect_errors=True
+    )
     assert "targets_not_list" in parsed["rf_param_errors"]
 
 
 def test_generated_id_that_collides_with_a_later_explicit_id_is_a_duplicate():
     parsed = parse_rf_params(
-        {"pointing_mode": "earth_fixed", "targets": [target(1, 2), target(3, 4, target_id="target-1")]},
+        {
+            "pointing_mode": "earth_fixed",
+            "targets": [target(1, 2), target(3, 4, target_id="target-1")],
+        },
         collect_errors=True,
     )
     assert "target_id_duplicate" in parsed["rf_param_errors"]
@@ -279,14 +322,24 @@ def test_overflowing_reachability_value_is_a_typed_error(key):
 
 
 def test_parsed_min_el_deg_matches_the_resolved_minimum_elevation():
-    parsed = parse_rf_params({"min_elevation_deg": 12.0}, path_default_min_elevation_deg=10.0)
+    parsed = parse_rf_params(
+        {"min_elevation_deg": 12.0}, path_default_min_elevation_deg=10.0
+    )
     assert parsed["min_el_deg"] == parsed["min_elevation_deg"] == 12.0
-    assert parse_rf_params({}, path_default_min_elevation_deg=10.0)["min_el_deg"] == 10.0
+    assert (
+        parse_rf_params({}, path_default_min_elevation_deg=10.0)["min_el_deg"] == 10.0
+    )
 
 
 def test_parse_error_codes_are_deduplicated():
     with pytest.raises(RfParamParseError) as info:
         parse_rf_params(
-            {"pointing_mode": "earth_fixed", "targets": [{"target_lat": "x", "target_lon": 1}, {"target_lat": "y", "target_lon": 1}]}
+            {
+                "pointing_mode": "earth_fixed",
+                "targets": [
+                    {"target_lat": "x", "target_lon": 1},
+                    {"target_lat": "y", "target_lon": 1},
+                ],
+            }
         )
     assert info.value.codes.count("target_lat_invalid") == 1

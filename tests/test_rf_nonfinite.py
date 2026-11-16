@@ -31,12 +31,19 @@ def test_collect_errors_keeps_nonfinite_field_code(field):
     assert f"{field}_invalid" in parsed["rf_param_errors"]
 
 
-@pytest.mark.parametrize("field", ("frequency_ghz", "bandwidth_mhz"))
+@pytest.mark.parametrize("field", ("frequency_ghz", "frequency", "bandwidth_mhz"))
 def test_rf_unit_conversion_cannot_overflow(field):
     with pytest.raises(RfKeyError) as caught:
         parse_rf_params({**RF, field: 1e308})
 
     assert caught.value.key == field
+
+
+def test_bandwidth_mhz_unit_overflow_keeps_positive_finite_message():
+    with pytest.raises(RfKeyError, match="positive finite") as caught:
+        parse_rf_params({**RF, "bandwidth_mhz": 1e303})
+
+    assert caught.value.key == "bandwidth_mhz"
 
 
 @pytest.mark.parametrize(
