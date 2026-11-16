@@ -312,6 +312,46 @@ _VALIDATION_MESSAGES = {
         "A trajectory sample has an invalid position or timestamp.",
     ),
 }
+
+# RF parser errors are reported through the request-validation envelope by
+# every engine route.  Keep the registry field-specific for the RF inputs that
+# otherwise use legacy defaults or clamping.
+for _rf_field in (
+    "frequency_ghz",
+    "frequency",
+    "freq_hz",
+    "frequency_hz",
+    "eirp",
+    "eirp_dbw",
+    "tx_power",
+    "tx_gain",
+    "tx_power_dbw",
+    "tx_gain_dbi",
+    "rx_gain_dbi",
+    "rx_gain",
+    "beamwidth_deg",
+    "beamwidth",
+    "aperture_radius_wl",
+    "aperture_radius_m",
+    "system_noise_temp_k",
+    "bandwidth_mhz",
+    "bandwidth_hz",
+    "max_gain_dbi",
+    "ln_db",
+    "ellipticity_ratio",
+    "spacing_wl",
+    "element_exponent",
+    "num_elements_x",
+    "num_elements_y",
+    "availability_percent",
+    "additional_losses_db",
+    "polarization_loss_db",
+    "min_elevation_deg",
+    "min_el_deg",
+):
+    _VALIDATION_MESSAGES.setdefault(
+        f"{_rf_field}_invalid", (_rf_field, f"{_rf_field} must be a finite number.")
+    )
 EARTH_FIXED_VALIDATION_REGISTRY = {
     code: _validation_meta(
         field,

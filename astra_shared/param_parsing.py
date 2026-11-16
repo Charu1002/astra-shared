@@ -96,6 +96,96 @@ PFD_LIMIT_PRESETS = {
 }
 
 
+# Numeric RF inputs parsed below, including legacy aliases.  These are checked
+# before clamping so NaN, infinity, and conversion overflow cannot become a
+# plausible default or range endpoint.  Keep generic parsing helpers unchanged:
+# they also serve non-RF UI inputs that intentionally use their defaults.
+_RF_FLOAT_FIELDS = (
+    "frequency_ghz",
+    "frequency",
+    "freq_hz",
+    "frequency_hz",
+    "eirp",
+    "eirp_dbw",
+    "tx_power",
+    "tx_gain",
+    "tx_power_dbw",
+    "tx_gain_dbi",
+    "rx_gain_dbi",
+    "rx_gain",
+    "beamwidth_deg",
+    "beamwidth",
+    "aperture_radius_wl",
+    "aperture_radius_m",
+    "system_noise_temp_k",
+    "bandwidth_mhz",
+    "bandwidth_hz",
+    "max_gain_dbi",
+    "ln_db",
+    "ellipticity_ratio",
+    "spacing_wl",
+    "element_exponent",
+    "num_elements_x",
+    "num_elements_y",
+    "availability_percent",
+    "additional_losses_db",
+    "polarization_loss_db",
+    "min_elevation_deg",
+    "min_el_deg",
+)
+
+_RF_UNIT_SCALES = {
+    "frequency_ghz": 1.0e9,
+    "frequency": 1.0e9,
+    "bandwidth_mhz": 1.0e6,
+}
+
+_RF_INVALID_CODES = {key: f"{key}_invalid" for key in _RF_FLOAT_FIELDS}
+
+
+def _active_bandwidth_key(params: dict) -> str | None:
+    if params.get("bandwidth_mhz") not in (None, "", "null"):
+        return "bandwidth_mhz"
+    if params.get("bandwidth_hz") not in (None, "", "null"):
+        return "bandwidth_hz"
+    return None
+
+
+def _reject_nonfinite_rf_inputs(
+    params: dict, *, defer_keys: frozenset[str] = frozenset()
+) -> None:
+    """Raise a field-specific error for a non-finite RF input."""
+    active_bandwidth_key = _active_bandwidth_key(params)
+    for key in _RF_FLOAT_FIELDS:
+        if key in defer_keys or key == active_bandwidth_key:
+            # The dedicated parser owns the existing field-specific semantics:
+            # bandwidth must say "positive finite", and Earth-Fixed elevation
+            # errors must be collected with the rest of that request's errors.
+            continue
+        raw = params.get(key)
+        if raw is None or raw == "":
+            continue
+        try:
+            value = float(raw)
+        except OverflowError as exc:
+            raise RfKeyError(
+                f"{key} must be a finite number",
+                key=key,
+                code=_RF_INVALID_CODES[key],
+            ) from exc
+        except (TypeError, ValueError):
+            # Preserve each field parser's existing malformed-text policy.
+            continue
+        if not math.isfinite(value) or not math.isfinite(
+            value * _RF_UNIT_SCALES.get(key, 1.0)
+        ):
+            raise RfKeyError(
+                f"{key} must be a finite number",
+                key=key,
+                code=_RF_INVALID_CODES[key],
+            )
+
+
 def _get_float(
     params: dict,
     key: str,
@@ -638,6 +728,17 @@ def _parse_rf_params(
     Callers use the subset they need � unused keys are harmless.
     """
     params, _conversion = convert_rf_block(params)
+    pointing_mode, pointing_error = _normalize_pointing_mode(
+        params.get("pointing_mode")
+    )
+    _reject_nonfinite_rf_inputs(
+        params,
+        defer_keys=(
+            frozenset({"min_elevation_deg", "min_el_deg"})
+            if pointing_mode == "earth_fixed"
+            else frozenset()
+        ),
+    )
 
     if params.get("frequency_ghz") not in (None, "") or params.get("frequency") not in (
         None,
@@ -687,9 +788,6 @@ def _parse_rf_params(
     )
 
     earth_fixed_errors: list[str] = []
-    pointing_mode, pointing_error = _normalize_pointing_mode(
-        params.get("pointing_mode")
-    )
     if pointing_error:
         earth_fixed_errors.append(pointing_error)
     assignment_rule, assignment_error = _normalize_assignment_rule(
