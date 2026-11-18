@@ -11,11 +11,12 @@ from __future__ import annotations
 
 import logging
 import math
-import warnings
 
 import pytest
 
 sgp4_api = pytest.importorskip("sgp4.api")
+
+from sgp4.propagation import gstime
 
 from astra_shared.geo_math import (
     FRAME_VELOCITY_UNITS_ERROR,
@@ -24,7 +25,6 @@ from astra_shared.geo_math import (
     lvlh_reference_velocity,
     teme_state_to_ecef,
     teme_to_ecef,
-    teme_vel_to_ecef,
 )
 
 GOLDEN = {
@@ -67,10 +67,16 @@ def _sub(a, b):
 
 
 def _rotated(case):
-    """The pre-fix result: TEME velocity rotated into ECEF axes (inertial velocity)."""
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore", DeprecationWarning)
-        return teme_vel_to_ecef(*case["v_teme"], case["jd"] + case["fr"])
+    """The pre-fix result: TEME velocity rotated into ECEF axes (inertial velocity).
+
+    Computed independently of teme_state_to_ecef and lvlh_reference_velocity (a plain
+    R3(GMST) rotation, what the pre-fix velocity conversion returned), so the tests that
+    compare against it still catch a missing Earth-rotation term.
+    """
+    theta = gstime(case["jd"] + case["fr"])
+    cos_t, sin_t = math.cos(theta), math.sin(theta)
+    vx, vy, vz = case["v_teme"]
+    return cos_t * vx + sin_t * vy, -sin_t * vx + cos_t * vy, vz
 
 
 def _propagate(sat, jd, fr):
@@ -174,8 +180,3 @@ def test_speed_check_logs_before_raising(caplog):
     with caplog.at_level(logging.ERROR, logger="astra_shared.geo_math"), pytest.raises(ValueError):
         check_inertial_speed_km_s((6928.0, 0.0, 0.0), (0.0, 7600.0, 0.0))
     assert any(FRAME_VELOCITY_UNITS_ERROR in rec.getMessage() for rec in caplog.records)
-
-
-def test_teme_vel_to_ecef_is_deprecated():
-    with pytest.warns(DeprecationWarning):
-        teme_vel_to_ecef(1.0, 2.0, 3.0, 2461343.5)

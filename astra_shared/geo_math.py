@@ -21,7 +21,6 @@ from __future__ import annotations
 
 import logging
 import math
-import warnings
 
 import numpy as np
 
@@ -216,31 +215,6 @@ def teme_to_ecef(x: float, y: float, z: float, jd: float) -> tuple[float, float,
     cos_t = math.cos(theta)
     sin_t = math.sin(theta)
     return cos_t * x + sin_t * y, -sin_t * x + cos_t * y, z
-
-
-def teme_vel_to_ecef(
-    vx: float, vy: float, vz: float, jd: float
-) -> tuple[float, float, float]:
-    """Rotate a TEME velocity (km/s) into ECEF axes. Deprecated.
-
-    The result is the INERTIAL velocity expressed in ECEF axes, NOT the velocity
-    relative to the rotating Earth: the -omega x r term is missing, which puts up
-    to ~505 m/s of error into a LEO velocity. Use teme_state_to_ecef() instead.
-    Kept only until every caller has moved (Issue #19); it will be removed.
-    """
-    warnings.warn(
-        "teme_vel_to_ecef() omits the Earth-rotation term; use teme_state_to_ecef()",
-        DeprecationWarning,
-        stacklevel=2,
-    )
-    try:
-        from sgp4.propagation import gstime
-    except ImportError as exc:
-        raise RuntimeError("sgp4 package required for teme_vel_to_ecef") from exc
-    theta = gstime(jd)
-    cos_t = math.cos(theta)
-    sin_t = math.sin(theta)
-    return cos_t * vx + sin_t * vy, -sin_t * vx + cos_t * vy, vz
 
 
 def teme_state_to_ecef(
