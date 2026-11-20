@@ -206,3 +206,17 @@ def test_bad_modulation_is_a_typed_request_error():
         "field": "modulation",
         "category": "request",
     }
+
+
+@pytest.mark.parametrize(
+    ("code", "field"),
+    [
+        ("multibeam_rf_not_object", "rf"),
+        ("multibeam_top_level_min_elevation_with_rf", "min_elevation_deg"),
+    ],
+)
+def test_multibeam_request_shape_codes_are_typed_request_errors(code, field):
+    detail = validation_error_detail(code)
+    assert detail["field"] == field
+    assert detail["category"] == "request"
+    assert detail["message"] != "Validation failed."

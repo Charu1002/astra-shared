@@ -184,6 +184,11 @@ _VALIDATION_MESSAGES = {
     ),
     "coverage_rf_null": ("rf", "Coverage RF configuration must be an object."),
     "coverage_rf_not_object": ("rf", "Coverage RF configuration must be an object."),
+    "multibeam_rf_not_object": ("rf", "Multibeam RF configuration must be an object."),
+    "multibeam_top_level_min_elevation_with_rf": (
+        "min_elevation_deg",
+        "Send the multibeam mask as top-level min_el_deg or inside rf, not as a top-level min_elevation_deg next to rf.",
+    ),
     "coverage_top_level_pointing_alias": (
         "rf",
         "Coverage earth-fixed pointing fields must be nested under rf.",
