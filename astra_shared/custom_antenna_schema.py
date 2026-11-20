@@ -18,6 +18,42 @@ MAX_PSI_POINTS = 2000
 MAX_PHI_POINTS = 4000
 MAX_GAIN_CELLS = 1_000_000
 
+# File acceptance rules shared with NetSim (comparison report rows D8, D17).
+# Two samples of the same grid point agree when their gains differ by at most
+# DUPLICATE_GAIN_TOL_DB; the first copy is kept.  A pole row (psi = 0 or 180,
+# one direction) may spread by at most POLE_ROW_MAX_SPREAD_DB.
+DUPLICATE_GAIN_TOL_DB = 1e-9
+POLE_ROW_MAX_SPREAD_DB = 0.1
+POLE_ROW_PSI_DEG = (0.0, 180.0)
+
+
+def wrap_phi_deg(value: float) -> float:
+    """Reduce phi to [0, 360) exactly as NetSim does.
+
+    Equivalent to ``while phi < 0: phi += 360`` then
+    ``while phi >= 360: phi -= 360``.  ``%`` alone is not enough: for a tiny
+    negative phi it returns 360.0, so the second step is needed.
+    """
+    phi = float(value) % 360.0
+    if phi >= 360.0:
+        phi -= 360.0
+    return phi
+
+
+def pole_row_spread_db(gains_db: list[float]) -> float:
+    """Spread (max - min) of the gains of one pole row, in dB."""
+    return max(gains_db) - min(gains_db)
+
+
+def pole_row_representative_db(gains_db: list[float]) -> float:
+    """Power average of a pole row, in dB.
+
+    representative = max + 10*log10(mean(10^((g - max)/10))), NetSim's rule.
+    """
+    peak = max(gains_db)
+    mean_rel = sum(10.0 ** ((g - peak) / 10.0) for g in gains_db) / len(gains_db)
+    return peak + 10.0 * math.log10(mean_rel)
+
 
 def default_custom_antenna() -> dict[str, Any]:
     """Return the canonical default custom_antenna payload for schema v1."""
@@ -63,7 +99,7 @@ def normalize_custom_antenna(raw: dict[str, Any] | None) -> dict[str, Any]:
     psi_deg = _parse_numeric_list(raw.get("psi_deg"))
     phi_deg = _parse_numeric_list(raw.get("phi_deg"))
     gain_dbi = _parse_numeric_matrix(raw.get("gain_dbi"))
-    phi_deg, gain_dbi = _normalize_phi_grid_and_gain(phi_deg, gain_dbi)
+    phi_deg, gain_dbi, phi_conflict = _normalize_phi_grid_and_gain(phi_deg, gain_dbi)
 
     normalized["psi_deg"] = psi_deg
     normalized["phi_deg"] = phi_deg
@@ -76,6 +112,7 @@ def normalize_custom_antenna(raw: dict[str, Any] | None) -> dict[str, Any]:
         psi_deg=psi_deg,
         phi_deg=phi_deg,
         gain_dbi=gain_dbi,
+        phi_conflict=phi_conflict,
     )
 
     # Step 9.5 invariants: deterministic/de-duplicated validation vectors.
@@ -162,42 +199,53 @@ def _parse_numeric_matrix(value: Any) -> list[list[float]]:
     return matrix
 
 
-def _normalize_phi_deg(value: float) -> float:
-    phi = float(value) % 360.0
-    return 0.0 if math.isclose(phi, 360.0, rel_tol=0.0, abs_tol=1e-9) else phi
-
-
 def _normalize_phi_grid_and_gain(
     phi_deg: list[float], gain_dbi: list[list[float]]
-) -> tuple[list[float], list[list[float]]]:
-    if not phi_deg:
-        return [], gain_dbi
+) -> tuple[list[float], list[list[float]], bool]:
+    """Wrap phi to [0, 360), sort it, and merge columns that name one azimuth.
 
+    Columns collide only when their wrapped phi values are exactly equal, as
+    in NetSim.  The first column (in input order) is kept.  The returned flag
+    is True when a dropped column differs from the kept one by more than
+    DUPLICATE_GAIN_TOL_DB in some row; the caller reports that as an error
+    instead of losing the data silently.  Rows shorter than ``phi_deg`` are
+    left for the shape check and skipped here.
+    """
+    if not phi_deg:
+        return [], gain_dbi, False
+
+    # sorted() is stable, so equal wrapped values keep their input order and
+    # the first one seen is the first column of the input.
     indexed = sorted(
-        ((idx, _normalize_phi_deg(phi)) for idx, phi in enumerate(phi_deg)),
+        ((idx, wrap_phi_deg(phi)) for idx, phi in enumerate(phi_deg)),
         key=lambda item: item[1],
     )
     kept_indices: list[int] = []
     normalized_phi: list[float] = []
-    seen: set[float] = set()
+    merged: list[tuple[int, int]] = []  # (kept index, dropped index)
+    kept_by_phi: dict[float, int] = {}
     for original_idx, phi in indexed:
-        key = round(phi, 9)
-        if key in seen:
+        if phi in kept_by_phi:
+            merged.append((kept_by_phi[phi], original_idx))
             continue
-        seen.add(key)
+        kept_by_phi[phi] = original_idx
         kept_indices.append(original_idx)
         normalized_phi.append(phi)
 
     if not gain_dbi:
-        return normalized_phi, gain_dbi
+        return normalized_phi, gain_dbi, False
 
+    conflict = False
     reordered_gain: list[list[float]] = []
     for row in gain_dbi:
         if len(row) < len(phi_deg):
             reordered_gain.append(row)
             continue
+        for kept_idx, dropped_idx in merged:
+            if abs(row[dropped_idx] - row[kept_idx]) > DUPLICATE_GAIN_TOL_DB:
+                conflict = True
         reordered_gain.append([row[idx] for idx in kept_indices])
-    return normalized_phi, reordered_gain
+    return normalized_phi, reordered_gain, conflict
 
 
 def _validate_shape_and_content(
@@ -208,6 +256,7 @@ def _validate_shape_and_content(
     psi_deg: list[float],
     phi_deg: list[float],
     gain_dbi: list[list[float]],
+    phi_conflict: bool = False,
 ) -> tuple[list[str], list[str]]:
     errors: list[str] = []
     warnings: list[str] = []
@@ -218,6 +267,24 @@ def _validate_shape_and_content(
         else:
             errors.append("no_pattern_loaded")
         return errors, warnings
+
+    # The checks below apply to enabled patterns only, so a disabled payload
+    # that carries a stale table stays valid.
+
+    # Two phi columns named the same azimuth (e.g. 0 and 360) with different
+    # gains.  NetSim rejects the file; keeping either column loses data.
+    if phi_conflict:
+        errors.append("phi_grid_duplicate_conflict")
+
+    # NetSim needs at least two distinct samples per axis.  With one, the
+    # lookup cannot interpolate along that axis.  phi_deg is already merged
+    # to distinct values; psi_deg may still repeat (the monotonic check below
+    # uses '>'), so count distinct values.
+    if psi_deg and phi_deg:
+        if len(set(psi_deg)) < 2:
+            errors.append("insufficient_psi_points")
+        if len(set(phi_deg)) < 2:
+            errors.append("insufficient_phi_points")
 
     if source_format is None:
         errors.append("missing_source_format")

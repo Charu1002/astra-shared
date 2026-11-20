@@ -13,7 +13,7 @@ from astra_shared.custom_antenna_interpolation import lookup_custom_gain_db
 def test_parse_valid_rectangular_csv_to_canonical_payload():
     text = """psi_deg,phi_deg,gain_dbi
 0,0,30
-0,180,20
+0,180,30
 10,0,15
 10,180,5
 """
@@ -23,7 +23,7 @@ def test_parse_valid_rectangular_csv_to_canonical_payload():
     assert payload["filename"] == "pattern.csv"
     assert payload["psi_deg"] == [0.0, 10.0]
     assert payload["phi_deg"] == [0.0, 180.0]
-    assert payload["gain_dbi"] == [[0.0, -10.0], [-15.0, -25.0]]
+    assert payload["gain_dbi"] == [[0.0, 0.0], [-15.0, -25.0]]
     assert payload["validation"]["is_valid"] is False
     assert "missing_frequency_hz" in payload["validation"]["errors"]
 
@@ -34,14 +34,14 @@ def test_parse_supports_alias_headers_and_preamble_comments():
 
  theta,azimuth_deg,gain_db
 0,0,30
-0,180,20
+0,180,30
 10,0,15
 10,180,5
 """
     payload = parse_custom_antenna_csv_text(text)
     assert payload["psi_deg"] == [0.0, 10.0]
     assert payload["phi_deg"] == [0.0, 180.0]
-    assert payload["gain_dbi"] == [[0.0, -10.0], [-15.0, -25.0]]
+    assert payload["gain_dbi"] == [[0.0, 0.0], [-15.0, -25.0]]
 
 
 def test_parse_skips_partial_metadata_header_before_real_header():
@@ -49,7 +49,7 @@ def test_parse_skips_partial_metadata_header_before_real_header():
 generated,example
 psi_deg,phi_deg,gain_dbi
 0,0,30
-0,180,20
+0,180,30
 10,0,15
 10,180,5
 """
@@ -61,7 +61,7 @@ psi_deg,phi_deg,gain_dbi
 def test_parse_header_token_normalization_accepts_case_space_dash_variants():
     text = """ Off Axis-Deg , Az Deg , GAIN-DB
 0,0,30
-0,180,20
+0,180,30
 10,0,15
 10,180,5
 """
@@ -72,9 +72,9 @@ def test_parse_header_token_normalization_accepts_case_space_dash_variants():
 
 def test_parse_normalizes_negative_phi_to_zero_360_convention():
     text = """psi_deg,phi_deg,gain_dbi
-0,-90,30
-0,0,20
-0,90,10
+1,-90,30
+1,0,20
+1,90,10
 10,-90,15
 10,0,5
 10,90,1
@@ -86,17 +86,17 @@ def test_parse_normalizes_negative_phi_to_zero_360_convention():
 
 def test_negative_phi_grid_interpolates_across_zero_degree_seam():
     text = """psi_deg,phi_deg,gain_dbi
-0,-90,30
-0,0,20
-0,90,10
+1,-90,30
+1,0,20
+1,90,10
 10,-90,15
 10,0,5
 10,90,1
 """
     payload = parse_custom_antenna_csv_text(text)
     payload["validation"]["is_valid"] = True
-    assert lookup_custom_gain_db(0.0, 359.0, payload) == pytest.approx(-9.8888888889)
-    assert lookup_custom_gain_db(0.0, 1.0, payload) == pytest.approx(-10.1111111111)
+    assert lookup_custom_gain_db(1.0, 359.0, payload) == pytest.approx(-9.8888888889)
+    assert lookup_custom_gain_db(1.0, 1.0, payload) == pytest.approx(-10.1111111111)
 
 
 @pytest.mark.parametrize(
