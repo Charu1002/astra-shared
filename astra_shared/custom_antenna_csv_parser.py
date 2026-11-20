@@ -20,7 +20,15 @@ from io import StringIO
 from typing import Any
 
 from .custom_antenna_errors import CustomAntennaErrorCode
-from .custom_antenna_schema import normalize_custom_antenna
+from .custom_antenna_schema import (
+    DUPLICATE_GAIN_TOL_DB,
+    POLE_ROW_MAX_SPREAD_DB,
+    POLE_ROW_PSI_DEG,
+    normalize_custom_antenna,
+    pole_row_representative_db,
+    pole_row_spread_db,
+    wrap_phi_deg,
+)
 
 
 class CsvErrorCode:
@@ -37,6 +45,8 @@ class CsvErrorCode:
     INSUFFICIENT_PHI_POINTS = CustomAntennaErrorCode.CSV_INSUFFICIENT_PHI_POINTS
     DUPLICATE_GRID_POINT = CustomAntennaErrorCode.CSV_DUPLICATE_GRID_POINT
     INCOMPLETE_TABLE = CustomAntennaErrorCode.CSV_INCOMPLETE_TABLE
+    MIXED_PHI_CONVENTION = CustomAntennaErrorCode.CSV_MIXED_PHI_CONVENTION
+    POLE_ROW_INCONSISTENT = CustomAntennaErrorCode.POLE_ROW_INCONSISTENT
 
 
 class CustomAntennaCsvError(ValueError):
@@ -147,6 +157,8 @@ def parse_custom_antenna_csv_text(
     field_map = _canonical_field_map(reader.fieldnames)
 
     triples: list[tuple[float, float, float]] = []
+    saw_negative_phi = False
+    saw_phi_above_180 = False
     for line_no, row in enumerate(reader, start=2):
         if None in row:
             raise CustomAntennaCsvError(
@@ -172,7 +184,22 @@ def parse_custom_antenna_csv_text(
         if phi < -180.0 or phi > 360.0:
             raise CustomAntennaCsvError(CsvErrorCode.PHI_OUT_OF_RANGE, line_no=line_no)
 
-        triples.append((psi, phi, gain))
+        # A file gives phi either as -180..180 or as 0..360.  NetSim rejects
+        # a mix at the first row where both a negative phi and a phi above
+        # 180 have been seen.  This must run on the raw phi, before wrapping.
+        if phi < 0.0:
+            saw_negative_phi = True
+        if phi > 180.0:
+            saw_phi_above_180 = True
+        if saw_negative_phi and saw_phi_above_180:
+            raise CustomAntennaCsvError(
+                CsvErrorCode.MIXED_PHI_CONVENTION, line_no=line_no
+            )
+
+        # Wrap phi to [0, 360) here, as NetSim does, so that the sample count,
+        # the duplicate check and the completeness check below all see 0 and
+        # 360 (or -90 and 270) as the same azimuth.
+        triples.append((psi, wrap_phi_deg(phi), gain))
 
     if not triples:
         raise CustomAntennaCsvError(CsvErrorCode.NO_DATA_ROWS)
@@ -185,11 +212,15 @@ def parse_custom_antenna_csv_text(
     if len(phi_grid) < 2:
         raise CustomAntennaCsvError(CsvErrorCode.INSUFFICIENT_PHI_POINTS)
 
+    # A grid point given twice is accepted when both gains agree within
+    # DUPLICATE_GAIN_TOL_DB (the first copy is kept) and rejected otherwise.
     cell_map: dict[tuple[float, float], float] = {}
     for psi, phi, gain in triples:
         key = (psi, phi)
         if key in cell_map:
-            raise CustomAntennaCsvError(CsvErrorCode.DUPLICATE_GRID_POINT)
+            if abs(gain - cell_map[key]) > DUPLICATE_GAIN_TOL_DB:
+                raise CustomAntennaCsvError(CsvErrorCode.DUPLICATE_GRID_POINT)
+            continue
         cell_map[key] = gain
 
     expected_points = len(psi_grid) * len(phi_grid)
@@ -205,6 +236,21 @@ def parse_custom_antenna_csv_text(
         for phi in phi_grid:
             row.append(cell_map[(psi, phi)])
         gain_table.append(row)
+
+    # A psi = 0 or psi = 180 row is a single direction.  Reject a spread above
+    # POLE_ROW_MAX_SPREAD_DB; power-average a smaller one.  This runs before
+    # peak normalization, so a pole-row peak is the averaged value, as in
+    # NetSim.
+    for row_idx, psi in enumerate(psi_grid):
+        if psi not in POLE_ROW_PSI_DEG:
+            continue
+        row = gain_table[row_idx]
+        if pole_row_spread_db(row) > POLE_ROW_MAX_SPREAD_DB:
+            raise CustomAntennaCsvError(
+                CsvErrorCode.POLE_ROW_INCONSISTENT, detail=f"psi_{psi:g}"
+            )
+        representative = pole_row_representative_db(row)
+        gain_table[row_idx] = [representative] * len(row)
 
     peak_gain_dbi = max(max(row) for row in gain_table)
     gain_table = [[gain_dbi - peak_gain_dbi for gain_dbi in row] for row in gain_table]

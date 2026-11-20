@@ -14,7 +14,7 @@ def test_ffd_parser_minimal_single_frequency_success():
 frequency_hz=12000000000
 theta phi e_theta e_phi
 0 0 1.0 0.0
-0 180 0.9 0.0
+0 180 1.0 0.0
 10 0 0.7 0.0
 10 180 0.5 0.0
 """
@@ -54,7 +54,7 @@ def test_ffd_parser_accepts_frequency_selection_when_header_is_absent():
     text = """
 theta phi e_theta e_phi
 0 0 1.0 0.0
-0 180 0.9 0.0
+0 180 1.0 0.0
 10 0 0.7 0.0
 10 180 0.5 0.0
 """
@@ -68,7 +68,7 @@ def test_ffd_parser_accepts_small_relative_frequency_difference():
 frequency_hz=11999999000
 theta phi e_theta e_phi
 0 0 1.0 0.0
-0 180 0.9 0.0
+0 180 1.0 0.0
 10 0 0.7 0.0
 10 180 0.5 0.0
 """
@@ -82,7 +82,7 @@ def test_ffd_parser_treats_phi_360_as_periodic_boundary_duplicate():
 frequency_hz=12000000000
 theta phi e_theta e_phi
 0 0 1.0 0.0
-0 180 0.9 0.0
+0 180 1.0 0.0
 0 360 1.0 0.0
 10 0 0.7 0.0
 10 180 0.5 0.0
@@ -98,8 +98,10 @@ def test_ffd_parser_rejects_conflicting_zero_and_360_degree_samples():
 frequency_hz=12000000000
 theta phi e_theta e_phi
 0 0 1.0 0.0
+0 180 1.0 0.0
 0 360 2.0 0.0
 10 0 0.7 0.0
+10 180 0.5 0.0
 10 360 0.7 0.0
 """
     with pytest.raises(CustomAntennaFfdError) as exc:

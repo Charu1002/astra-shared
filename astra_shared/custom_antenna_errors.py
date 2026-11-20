@@ -33,6 +33,13 @@ class CustomAntennaErrorCode:
     CSV_INSUFFICIENT_PHI_POINTS = "ca_validate_csv_insufficient_phi_points"
     CSV_DUPLICATE_GRID_POINT = "ca_validate_csv_duplicate_grid_point"
     CSV_INCOMPLETE_TABLE = "ca_validate_csv_incomplete_table"
+    # A CSV may give phi as -180..180 or as 0..360, not both (NetSim's rule).
+    CSV_MIXED_PHI_CONVENTION = "ca_validate_mixed_phi_convention"
+
+    # Shared CSV/FFD validation (NetSim's code names)
+    # A psi = 0 or psi = 180 row is one direction; its gains may spread by at
+    # most POLE_ROW_MAX_SPREAD_DB before the file is rejected.
+    POLE_ROW_INCONSISTENT = "ca_validate_pole_row_inconsistent"
 
     # FFD parser/validation/policy
     FFD_INVALID_INPUT_TYPE = "ca_parse_ffd_invalid_input_type"

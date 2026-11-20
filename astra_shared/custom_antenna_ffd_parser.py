@@ -14,7 +14,13 @@ import re
 from typing import Any
 
 from .custom_antenna_errors import CustomAntennaErrorCode
-from .custom_antenna_schema import normalize_custom_antenna
+from .custom_antenna_schema import (
+    DUPLICATE_GAIN_TOL_DB,
+    POLE_ROW_MAX_SPREAD_DB,
+    POLE_ROW_PSI_DEG,
+    normalize_custom_antenna,
+    pole_row_spread_db,
+)
 
 
 @dataclass
@@ -115,8 +121,10 @@ def parse_custom_antenna_ffd_text(
         )
 
     start_line_no = header_idx[0] + 1
-    rows: list[tuple[float, float, float]] = []
-    cell_power: dict[tuple[float, float], float] = {}
+    # (theta, phi, power, line_no) in file order.  The sample count, the
+    # duplicate check and the completeness check run after the loop, in
+    # NetSim's order: count, duplicates, completeness, pole rows.
+    samples: list[tuple[float, float, float, int]] = []
     for idx in range(start_line_no - 1, len(lines)):
         raw = lines[idx].strip()
         line_no = idx + 1
@@ -160,10 +168,10 @@ def parse_custom_antenna_ffd_text(
                 "phi must be in [0, 360] degrees.",
                 line_no,
             )
-        is_periodic_boundary = math.isclose(phi, 360.0, rel_tol=0, abs_tol=1e-9)
-        if is_periodic_boundary:
+        # phi = 360 is the same azimuth as phi = 0.  Wrap only exactly 360,
+        # as NetSim does; a phi just below 360 is its own column.
+        if phi == 360.0:
             phi = 0.0
-        key = (theta, phi)
         p = (e_theta * e_theta) + (e_phi * e_phi)
         if p <= 0:
             raise CustomAntennaFfdError(
@@ -171,35 +179,72 @@ def parse_custom_antenna_ffd_text(
                 "Computed field power must be positive.",
                 line_no,
             )
-        if key in cell_power:
-            # 0 and 360 degrees are the same periodic sample.  Accept the
-            # duplicate only when its field power agrees with the original;
-            # otherwise silently keeping either row corrupts the pattern.
-            if math.isclose(cell_power[key], p, rel_tol=1e-9, abs_tol=1e-12):
-                continue
-            raise CustomAntennaFfdError(
-                CustomAntennaErrorCode.FFD_DUPLICATE_GRID_POINT,
-                "Duplicate theta/phi sample encountered in FFD table.",
-                line_no,
-            )
-        cell_power[key] = p
-        rows.append((theta, phi, p))
+        samples.append((theta, phi, p, line_no))
 
-    if not rows:
+    if not samples:
         raise CustomAntennaFfdError(
             CustomAntennaErrorCode.FFD_NO_DATA_ROWS,
             "No numeric data rows found after header.",
         )
 
-    psi = sorted({r[0] for r in rows})
-    ph = sorted({r[1] for r in rows})
-    lookup = {(t, p): pw for t, p, pw in rows}
+    psi = sorted({s[0] for s in samples})
+    ph = sorted({s[1] for s in samples})
+
+    # At least two distinct theta and two distinct phi values, counted before
+    # the duplicate check (NetSim's order).  NetSim uses these csv-named codes
+    # for FFD files too.
+    if len(psi) < 2:
+        raise CustomAntennaFfdError(
+            CustomAntennaErrorCode.CSV_INSUFFICIENT_PSI_POINTS,
+            "FFD table needs at least two distinct theta values.",
+        )
+    if len(ph) < 2:
+        raise CustomAntennaFfdError(
+            CustomAntennaErrorCode.CSV_INSUFFICIENT_PHI_POINTS,
+            "FFD table needs at least two distinct phi values.",
+        )
+
+    # A grid point given twice (for example phi = 0 and phi = 360) is
+    # accepted when both powers agree within DUPLICATE_GAIN_TOL_DB, compared
+    # in dB so that the tolerance holds at any power level.  The first copy is
+    # kept.  Otherwise the file is rejected at the conflicting sample.
+    lookup: dict[tuple[float, float], float] = {}
+    for theta, phi, p, line_no in samples:
+        key = (theta, phi)
+        if key in lookup:
+            if abs(10.0 * math.log10(p / lookup[key])) > DUPLICATE_GAIN_TOL_DB:
+                raise CustomAntennaFfdError(
+                    CustomAntennaErrorCode.FFD_DUPLICATE_GRID_POINT,
+                    "Duplicate theta/phi sample encountered in FFD table.",
+                    line_no,
+                )
+            continue
+        lookup[key] = p
+
     missing = [(t, p) for t in psi for p in ph if (t, p) not in lookup]
     if missing:
         raise CustomAntennaFfdError(
             CustomAntennaErrorCode.FFD_INCOMPLETE_GRID,
             "FFD table does not form a complete rectangular theta/phi grid.",
         )
+
+    # A theta = 0 or theta = 180 row is a single direction.  Reject a spread
+    # above POLE_ROW_MAX_SPREAD_DB; power-average a smaller one (the linear
+    # mean of E^2) before peak normalization.
+    for t in psi:
+        if t not in POLE_ROW_PSI_DEG:
+            continue
+        row_power = [lookup[(t, p)] for p in ph]
+        row_db = [10.0 * math.log10(pw) for pw in row_power]
+        if pole_row_spread_db(row_db) > POLE_ROW_MAX_SPREAD_DB:
+            raise CustomAntennaFfdError(
+                CustomAntennaErrorCode.POLE_ROW_INCONSISTENT,
+                f"Pole row theta={t:g} spreads by more than "
+                f"{POLE_ROW_MAX_SPREAD_DB:g} dB across phi.",
+            )
+        mean_power = sum(row_power) / len(row_power)
+        for p in ph:
+            lookup[(t, p)] = mean_power
 
     peak = max(lookup.values())
     gain = []
