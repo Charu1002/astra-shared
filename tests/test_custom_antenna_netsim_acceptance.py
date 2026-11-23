@@ -377,3 +377,88 @@ def test_schema_disabled_payload_stays_valid_with_any_grid():
         payload = _enabled_payload(psi, phi, gain, enabled=False)
         assert payload["validation"]["is_valid"] is True
         assert payload["validation"]["warnings"] == ["pattern_present_but_disabled"]
+
+
+# --- Exact limits (review of #109, F-2) -------------------------------------
+# These pin the 1e-9 dB duplicate tolerance, the 0.1 dB pole limit and the
+# strict '>' of the pole check.  Loosening either limit, or changing '>' to
+# '>=', makes one of them fail.
+
+
+def test_csv_duplicate_1e8_db_apart_is_rejected():
+    text = _csv(
+        [(1, 0, 30), (1, 90, 30), (10, 0, 10), (10, 90, 12), (10, 0, 10.00000001)]
+    )
+    assert _csv_error(text).code == CsvErrorCode.DUPLICATE_GRID_POINT
+
+
+def test_ffd_duplicate_1e8_db_apart_is_rejected():
+    e = 0.5
+    e_far = e * 10 ** (1e-8 / 20)  # 1e-8 dB in power
+    text = _ffd([(0, 0, 1.0), (0, 90, 1.0), (10, 0, e), (10, 0, e_far), (10, 90, 0.25)])
+    err = _ffd_error(text)
+    assert err.code == CustomAntennaErrorCode.FFD_DUPLICATE_GRID_POINT
+    assert err.line_no == 6
+
+
+def test_schema_conflict_1e8_db_apart_is_reported():
+    payload = _enabled_payload(
+        [0, 10], [0, 180, 360], [[0, 0, 0], [-5, -6, -5.00000001]]
+    )
+    assert "phi_grid_duplicate_conflict" in payload["validation"]["errors"]
+
+
+def test_csv_pole_row_spread_0p15_db_is_rejected():
+    text = _csv([(0, 0, 30), (0, 180, 29.85), (10, 0, 20), (10, 180, 15)])
+    assert _csv_error(text).code == CsvErrorCode.POLE_ROW_INCONSISTENT
+
+
+def test_ffd_pole_row_spread_0p15_db_is_rejected():
+    e_low = 10 ** (-0.15 / 20)
+    text = _ffd([(0, 0, 1.0), (0, 180, e_low), (10, 0, 0.5), (10, 180, 0.5)])
+    assert _ffd_error(text).code == CustomAntennaErrorCode.POLE_ROW_INCONSISTENT
+
+
+def test_csv_pole_row_spread_of_exactly_0p1_db_is_accepted():
+    # 0.1 - 0.0 is exactly 0.1 in double precision.  NetSim rejects only a
+    # spread above 0.1 dB.
+    assert 0.1 - 0.0 == 0.1
+    text = _csv([(0, 0, 0.1), (0, 180, 0.0), (10, 0, -10), (10, 180, -15)])
+    payload = parse_custom_antenna_csv_text(text)
+    assert payload["psi_deg"] == [0.0, 10.0]
+
+
+def test_ffd_pole_row_spread_of_exactly_0p1_db_is_accepted():
+    # This pair is exactly 0.1 dB apart as the parser computes it,
+    # 10*log10(E^2).  (The review's pair, 1.010165808235598 and
+    # 0.9986025358479282, comes out at 0.09999999999999998 dB that way, so it
+    # would not tell '>' from '>='.)
+    e_hi, e_lo = 0.9848678477056328, 0.9735941586775221
+    assert 10 * math.log10(e_hi * e_hi) - 10 * math.log10(e_lo * e_lo) == 0.1
+    text = _ffd([(0, 0, e_hi), (0, 180, e_lo), (10, 0, 0.5), (10, 180, 0.5)])
+    out = parse_custom_antenna_ffd_text(text)
+    assert out["validation"]["is_valid"] is True
+
+
+# --- Extreme FFD values (review of #109, F-1 and F-6) -----------------------
+
+
+def test_ffd_duplicate_far_below_first_copy_is_rejected_not_crash():
+    # F-1: E = 1e10 then 1e-160 is about 3400 dB apart.  The ratio of the two
+    # powers underflows to 0; the parser must still reject the file cleanly.
+    text = _ffd(
+        [(0, 0, 1.0), (0, 90, 1.0), (10, 0, 1.0), (10, 90, 1e10), (10, 90, 1e-160)]
+    )
+    err = _ffd_error(text)
+    assert err.code == CustomAntennaErrorCode.FFD_DUPLICATE_GRID_POINT
+    assert err.line_no == 7
+
+
+def test_ffd_pole_row_near_max_float_is_accepted_not_crash():
+    # F-6: E = 1e154 gives a power near 1e308; summing the pole row overflowed
+    # to inf.  main accepts this file, so a saved project may already use it.
+    text = _ffd([(0, 0, 1e154), (0, 90, 1e154), (10, 0, 1.0), (10, 90, 1.0)])
+    out = parse_custom_antenna_ffd_text(text)
+    assert out["validation"]["is_valid"] is True
+    assert out["gain_dbi"][0] == [0.0, 0.0]
+    assert out["gain_dbi"][1] == pytest.approx([-3080.0, -3080.0])

@@ -208,11 +208,14 @@ def parse_custom_antenna_ffd_text(
     # accepted when both powers agree within DUPLICATE_GAIN_TOL_DB, compared
     # in dB so that the tolerance holds at any power level.  The first copy is
     # kept.  Otherwise the file is rejected at the conflicting sample.
+    # Subtract the two dB values, as NetSim does: the ratio p / p_old can
+    # underflow to 0 for a very large difference, and log10(0) raises.
     lookup: dict[tuple[float, float], float] = {}
     for theta, phi, p, line_no in samples:
         key = (theta, phi)
         if key in lookup:
-            if abs(10.0 * math.log10(p / lookup[key])) > DUPLICATE_GAIN_TOL_DB:
+            diff_db = 10.0 * math.log10(p) - 10.0 * math.log10(lookup[key])
+            if abs(diff_db) > DUPLICATE_GAIN_TOL_DB:
                 raise CustomAntennaFfdError(
                     CustomAntennaErrorCode.FFD_DUPLICATE_GRID_POINT,
                     "Duplicate theta/phi sample encountered in FFD table.",
@@ -242,7 +245,10 @@ def parse_custom_antenna_ffd_text(
                 f"Pole row theta={t:g} spreads by more than "
                 f"{POLE_ROW_MAX_SPREAD_DB:g} dB across phi.",
             )
-        mean_power = sum(row_power) / len(row_power)
+        # Scale by the row maximum before averaging: summing raw powers near
+        # 1e308 overflows to inf.
+        top = max(row_power)
+        mean_power = top * (sum(pw / top for pw in row_power) / len(row_power))
         for p in ph:
             lookup[(t, p)] = mean_power
 
