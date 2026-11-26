@@ -86,7 +86,16 @@ def lookup_custom_gain_db_array(
     phi_policy: str = "wrap_360",
     out_of_range: str = "clamp",
 ) -> np.ndarray:
-    """Vectorized bilinear custom gain lookup for NumPy-shaped inputs."""
+    """Vectorized form of ``lookup_custom_gain_db``: the same value for every query.
+
+    It follows the scalar rules one for one, so a batched caller gets exactly the scalar
+    result on every accepted grid, including repeated grid values and one-dimensional
+    tables: a non-finite psi reads as 0 and a non-finite phi as the first phi sample; at
+    or beyond an end of the psi grid (or a non-periodic phi grid) the end row is used,
+    the last of any repeated end values; an exact hit is the first matching sample; the
+    periodic phi cell crosses the 360 -> 0 seam; a one-dimensional grid takes the nearest
+    sample (the first on a tie), measured as the scalar path measures it.
+    """
     psi_arr, phi_arr = np.broadcast_arrays(
         np.asarray(psi_deg, dtype=np.float64),
         np.asarray(phi_deg, dtype=np.float64),
@@ -105,37 +114,23 @@ def lookup_custom_gain_db_array(
     ):
         return np.zeros_like(psi_arr, dtype=np.float64)
 
-    psi_q = np.nan_to_num(psi_arr, nan=0.0, posinf=180.0, neginf=0.0)
-    psi_q = np.clip(psi_q, float(psi_grid[0]), float(psi_grid[-1]))
+    psi_q = np.where(np.isfinite(psi_arr), np.clip(psi_arr, 0.0, 180.0), 0.0)
     phi_q = _normalize_phi_array(
         phi_arr, phi_grid, policy=phi_policy, out_of_range=out_of_range
     )
 
-    i1 = np.searchsorted(psi_grid, psi_q, side="left")
-    j1 = np.searchsorted(phi_grid, phi_q, side="left")
-    i1 = np.clip(i1, 0, psi_grid.size - 1)
-    j1 = np.clip(j1, 0, phi_grid.size - 1)
-    i0 = np.maximum(i1 - 1, 0)
-    j0 = np.maximum(j1 - 1, 0)
-    exact_i = psi_grid[i1] == psi_q
-    exact_j = phi_grid[j1] == phi_q
-    i0 = np.where(exact_i, i1, i0)
-    j0 = np.where(exact_j, j1, j0)
+    i0, i1 = _bracket_indices_array(psi_grid, psi_q)
+    j0, j1, phi_q = _bracket_phi_indices_array(phi_grid, phi_q, phi_policy)
+    exact = (i0 == i1) & (j0 == j1)
 
-    periodic_phi = _uses_periodic_phi_cell(phi_grid, phi_policy)
-    if periodic_phi:
-        raw_j1 = np.searchsorted(phi_grid, phi_q, side="left")
-        seam = (~exact_j) & ((raw_j1 == 0) | (raw_j1 == phi_grid.size))
-        j0 = np.where(seam, phi_grid.size - 1, j0)
-        j1 = np.where(seam, 0, j1)
-        phi_q = np.where((~exact_j) & (raw_j1 == 0), phi_q + 360.0, phi_q)
+    if psi_grid.size == 1 or phi_grid.size == 1:
+        nearest = gain[_nearest_index_array(psi_grid, psi_q), _nearest_index_array(phi_grid, phi_q)]
+        return np.where(exact, gain[i0, j0], nearest).astype(np.float64, copy=False)
 
     x0 = psi_grid[i0]
     x1 = psi_grid[i1]
     y0 = phi_grid[j0]
-    y1 = phi_grid[j1]
-    if periodic_phi:
-        y1 = np.where((j0 == phi_grid.size - 1) & (j1 == 0), y1 + 360.0, y1)
+    y1 = np.where((j0 == phi_grid.size - 1) & (j1 == 0), phi_grid[j1] + 360.0, phi_grid[j1])
     dx = x1 - x0
     dy = y1 - y0
     tx = np.divide(psi_q - x0, dx, out=np.zeros_like(psi_q), where=dx != 0)
@@ -151,13 +146,54 @@ def lookup_custom_gain_db_array(
         + q12 * (1.0 - tx) * ty
         + q22 * tx * ty
     )
+    return np.where(exact, q11, interpolated).astype(np.float64, copy=False)
 
-    degenerate = np.full(psi_q.shape, psi_grid.size == 1 or phi_grid.size == 1)
-    if np.any(degenerate):
-        nearest_i = np.where(np.abs(psi_q - x0) <= np.abs(psi_q - x1), i0, i1)
-        nearest_j = np.where(np.abs(phi_q - y0) <= np.abs(phi_q - y1), j0, j1)
-        interpolated = np.where(degenerate, gain[nearest_i, nearest_j], interpolated)
-    return interpolated.astype(np.float64, copy=False)
+
+def _bracket_indices_array(grid: np.ndarray, value: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """``_bracket_indices`` for an array of values."""
+    n = grid.size - 1
+    if grid.size == 1:
+        zeros = np.zeros(value.shape, dtype=np.intp)
+        return zeros, zeros
+    right = np.searchsorted(grid, value, side="left")
+    right_c = np.clip(right, 0, n)
+    exact = (right < grid.size) & (grid[right_c] == value)
+    i0 = np.where(exact, right_c, np.maximum(right_c - 1, 0))
+    i1 = right_c
+    high = value >= grid[-1]
+    i0 = np.where(high, n, i0)
+    i1 = np.where(high, n, i1)
+    low = value <= grid[0]  # checked first by the scalar rule
+    return np.where(low, 0, i0), np.where(low, 0, i1)
+
+
+def _bracket_phi_indices_array(
+    grid: np.ndarray, value: np.ndarray, policy: str
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """``_bracket_phi_indices`` for an array of values."""
+    if not _uses_periodic_phi_cell(grid, policy):
+        j0, j1 = _bracket_indices_array(grid, value)
+        return j0, j1, value
+    n = grid.size - 1
+    right = np.searchsorted(grid, value, side="left")
+    right_c = np.clip(right, 0, n)
+    exact = (right < grid.size) & (grid[right_c] == value)
+    before = (~exact) & (right == 0)
+    after = (~exact) & (right == grid.size)
+    j0 = np.where(exact, right_c, np.where(before | after, n, right_c - 1))
+    j1 = np.where(exact, right_c, np.where(before | after, 0, right_c))
+    return j0, j1, np.where(before, value + 360.0, value)
+
+
+def _nearest_index_array(grid: np.ndarray, value: np.ndarray) -> np.ndarray:
+    """``_nearest_gain``'s index on a sorted grid: the first index of the nearest sample."""
+    if grid.size == 1:
+        return np.zeros(value.shape, dtype=np.intp)
+    k = np.searchsorted(grid, value, side="left")
+    lo = np.clip(k - 1, 0, grid.size - 1)
+    hi = np.clip(k, 0, grid.size - 1)
+    pick = np.where(np.abs(grid[lo] - value) <= np.abs(grid[hi] - value), lo, hi)
+    return np.searchsorted(grid, grid[pick], side="left")
 
 
 def _is_payload_valid(payload: dict[str, Any] | None) -> bool:
@@ -211,9 +247,7 @@ def _normalize_phi_array(
     phi_deg: np.ndarray, phi_grid: np.ndarray, *, policy: str, out_of_range: str
 ) -> np.ndarray:
     x = np.asarray(phi_deg, dtype=np.float64)
-    x = np.nan_to_num(
-        x, nan=float(phi_grid[0]), posinf=float(phi_grid[-1]), neginf=float(phi_grid[0])
-    )
+    x = np.where(np.isfinite(x), x, float(phi_grid[0]))  # as the scalar path: the first sample
     p = (policy or "wrap_360").strip().lower()
     if p == "wrap_180":
         x = ((x + 180.0) % 360.0) - 180.0

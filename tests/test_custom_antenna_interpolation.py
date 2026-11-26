@@ -190,3 +190,70 @@ def test_g10_broadcast_vector_matches_scalar_pointwise():
     for i, row in enumerate(psi):
         for j, phi_value in enumerate(phi[0]):
             assert result[i, j] == pytest.approx(lookup_custom_gain_db(row[0], phi_value, payload), abs=1e-12)
+
+
+# --- the array lookup equals the scalar lookup on every accepted grid (radio #78 review P2-1) ---
+def _table(psi, phi, gain):
+    return {"enabled": True, "psi_deg": psi, "phi_deg": phi, "gain_dbi": gain, "validation": {"is_valid": True}}
+
+
+def _parity(table, psi, phi, policy="wrap_360"):
+    import numpy as np
+
+    from astra_shared.custom_antenna_interpolation import lookup_custom_gain_db, lookup_custom_gain_db_array
+
+    array = lookup_custom_gain_db_array(np.asarray(psi), np.asarray(phi), table, phi_policy=policy)
+    scalar = [lookup_custom_gain_db(a, b, table, phi_policy=policy) for a, b in zip(psi, phi)]
+    return [float(v) for v in array], scalar
+
+
+def test_array_lookup_takes_the_last_of_a_repeated_final_psi_row():
+    table = _table([0.0, 1.0, 1.0], [0.0, 180.0, 360.0], [[0.0, 0.0, 0.0], [-40.0, -40.0, -40.0], [-1.0, -1.0, -1.0]])
+    array, scalar = _parity(table, [10.0, 1.0, 0.5], [0.0, 90.0, 0.0])
+    assert scalar == [-1.0, -1.0, -20.0]  # at or beyond the final psi: the last of the repeated rows
+    assert array == scalar
+
+
+def test_array_lookup_matches_the_scalar_seam_rule_on_a_single_psi_row():
+    """An FFD import with one psi row and phi [5, 170, 340]: at phi 0 the scalar rule reads the
+    last sample (the query moves to 360 across the seam), not the wrapped first one."""
+    table = _table([0.0], [5.0, 170.0, 340.0], [[0.0, -10.0, -20.0]])
+    array, scalar = _parity(table, [0.0, 3.0, 10.0, 0.0], [0.0, 0.0, 100.0, 350.0])
+    assert scalar[0] == -20.0
+    assert array == scalar
+
+
+def test_array_lookup_reads_non_finite_queries_as_the_scalar_path_does():
+    import math
+
+    table = _table([0.0, 30.0], [0.0, 90.0, 180.0], [[10.0, 0.0, -10.0], [5.0, -5.0, -15.0]])
+    queries = [math.nan, math.inf, -math.inf, 15.0]
+    array, scalar = _parity(table, queries, [45.0, math.inf, math.nan, -math.inf])
+    assert array == scalar
+
+
+def test_array_lookup_equals_the_scalar_lookup_on_random_valid_tables():
+    import math
+
+    import numpy as np
+
+    rng = np.random.default_rng(20261127)
+    specials = [0.0, 180.0, -5.0, 400.0, math.nan, math.inf, 360.0, -180.0]
+    for _ in range(400):
+        n_psi, n_phi = int(rng.integers(1, 6)), int(rng.integers(1, 7))
+        psi = np.sort(rng.uniform(0.0, 90.0, n_psi))
+        phi = np.sort(rng.uniform(0.0, 360.0, n_phi))
+        for grid in (psi, phi):  # repeated values are accepted grids too
+            if grid.size > 1 and rng.random() < 0.5:
+                k = int(rng.integers(1, grid.size))
+                grid[k] = grid[k - 1]
+        gain = rng.uniform(-40.0, 30.0, (n_psi, n_phi)).round(2)
+        table = _table(psi.tolist(), phi.tolist(), gain.tolist())
+        q_psi = [*rng.uniform(-10.0, 200.0, 12), *psi.tolist(), *specials]
+        q_phi = [*rng.uniform(-400.0, 800.0, 12), *phi.tolist(), *specials]
+        size = max(len(q_psi), len(q_phi))
+        q_psi = [q_psi[i % len(q_psi)] for i in range(size)]
+        q_phi = [q_phi[(3 * i) % len(q_phi)] for i in range(size)]
+        for policy in ("wrap_360", "wrap_180", "clamp"):
+            array, scalar = _parity(table, q_psi, q_phi, policy)
+            assert array == scalar, (table, policy)
