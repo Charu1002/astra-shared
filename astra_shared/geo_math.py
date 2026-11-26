@@ -373,10 +373,11 @@ def latlon_to_ecef(
 # A0 WGS84 API (A0 plan v7, section 6.1)
 #
 # Units: metres, m/s and degrees at the interface; radians only inside.
-# Inputs: Python numbers, sequences of numbers, or real NumPy arrays. Bools,
-# strings, None, complex values and object arrays raise ValueError, as do
-# non-finite values. One invalid element fails the whole call. Inputs are not
-# modified; outputs are new float64 arrays (Python floats for scalar entries).
+# Inputs: Python numbers, sequences of numbers, or real NumPy arrays. Bools (also
+# as elements of a sequence), strings, None, complex values and object arrays
+# raise ValueError, as do non-finite values. One invalid element fails the
+# whole call. Inputs are not modified; outputs are new float64 arrays (Python
+# floats for scalar entries).
 # Cartesian arguments have a final axis of 3; the other axes broadcast.
 # ---------------------------------------------------------------------------
 
@@ -395,10 +396,22 @@ def _real_array(name: str, value) -> np.ndarray:
         raise ValueError(f"{name} must be a real number or an array of real numbers") from exc
     if arr.dtype.kind not in "iuf":
         raise ValueError(f"{name} must hold real numbers, got dtype {arr.dtype}")
+    if isinstance(value, (list, tuple)) and _has_bool_leaf(value):
+        # NumPy reads [True, 1] as integers; a bool element is refused as a bool scalar is.
+        raise ValueError(f"{name} must hold real numbers, not bools")
     arr = np.asarray(arr, dtype=np.float64)  # no copy for float64 input; inputs are never written
     if not np.all(np.isfinite(arr)):
         raise ValueError(f"{name} must be finite")
     return arr
+
+
+def _has_bool_leaf(value) -> bool:
+    """True when a Python sequence holds a bool or NumPy bool at any depth (section 6.1.1)."""
+    try:
+        leaves = np.asarray(value, dtype=object)
+    except (TypeError, ValueError):
+        return False
+    return any(isinstance(v, (bool, np.bool_)) for v in leaves.ravel())
 
 
 def _cartesian(name: str, value) -> np.ndarray:

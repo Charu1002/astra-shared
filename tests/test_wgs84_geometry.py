@@ -354,6 +354,55 @@ def test_g02_every_cartesian_entry_rejects_bool_and_non_finite(entry, bad):
         func(*args(bad))
 
 
+# A bool inside a Python list: NumPy reads [True, 1] and (True, 0.0, 1.0) as numbers, so
+# the entries must look at the elements (section 6.1.1 refuses bools; #112 closure P3-R3-1).
+VEC_COMPONENT_CALLS = {
+    "geodetic_to_ecef_vec lat": (geodetic_to_ecef_vec, lambda bad: (bad, [0.0, 0.0], 0.0), "lat_deg"),
+    "geodetic_to_ecef_vec lon": (geodetic_to_ecef_vec, lambda bad: ([0.0, 0.0], bad, 0.0), "lon_deg"),
+    "geodetic_to_ecef_vec alt": (geodetic_to_ecef_vec, lambda bad: ([0.0, 0.0], [0.0, 0.0], bad), "alt_m"),
+    "ecef_to_geodetic_vec": (ecef_to_geodetic_vec, lambda bad: ([7e6, 7e6], bad, [0.0, 0.0]), "y_m"),
+    "enu_basis_vec": (enu_basis_vec, lambda bad: (bad, [0.0, 0.0]), "lat_deg"),
+    "ecef_delta_to_enu_vec": (ecef_delta_to_enu_vec, lambda bad: (V3, [0.0, 0.0], bad), "lon_deg"),
+    "look_angles_ecef_vec": (look_angles_ecef_vec, lambda bad: (V3, G3, bad, [0.0, 0.0]), "lat_deg"),
+}
+
+
+@pytest.mark.parametrize("entry", sorted(VEC_COMPONENT_CALLS))
+@pytest.mark.parametrize("bad", [[True, 1], [1.0, np.bool_(False)]], ids=["bool-int", "float-numpy-bool"])
+def test_g02_a_bool_element_in_a_component_list_is_refused(entry, bad):
+    func, args, name = VEC_COMPONENT_CALLS[entry]
+    with pytest.raises(ValueError, match=f"{name} must hold real numbers, not bools"):
+        func(*args(bad))
+
+
+@pytest.mark.parametrize("entry", sorted(VECTOR_CALLS))
+@pytest.mark.parametrize(
+    "bad", [(True, 0.0, 1.0), [[1.0, 0.0, 0.0], [0.0, np.bool_(True), 0.0]]], ids=["tuple", "nested-numpy-bool"]
+)
+def test_g02_a_bool_element_in_a_cartesian_list_is_refused(entry, bad):
+    func, args, name = VECTOR_CALLS[entry]
+    if bad and isinstance(bad[0], list) and not entry.endswith("_vec"):
+        pytest.skip("a nested batch is not one 3-vector")
+    with pytest.raises(ValueError, match=f"{name} must hold real numbers, not bools"):
+        func(*args(bad))
+
+
+def test_g02_a_bool_element_is_refused_by_the_ray_entries():
+    from astra_shared.geo_math import intersect_ray_wgs84, intersect_ray_wgs84_vec
+
+    for entry in (intersect_ray_wgs84, intersect_ray_wgs84_vec):
+        with pytest.raises(ValueError, match="origin_m must hold real numbers, not bools"):
+            entry((7e6, False, 0.0), (-1.0, 0.0, 0.0))
+        with pytest.raises(ValueError, match="direction must hold real numbers, not bools"):
+            entry((7e6, 0.0, 0.0), (-1.0, 0.0, True))
+
+
+def test_g02_the_same_lists_without_bools_are_accepted():
+    """Controls: the refusal is the bool, not the list or the mix of ints and floats."""
+    geodetic_to_ecef_vec([1, 0.0], [1, 0.0], [0, 0.0])
+    look_angles_ecef_vec((7000000, 0.0, 1.0), G3, [0, 0.0], [0.0, 0])
+
+
 LATITUDE_CALLS = {
     "geodetic_to_ecef_vec": (geodetic_to_ecef_vec, lambda lat: (lat, 0.0, 0.0)),
     "enu_basis": (enu_basis, lambda lat: (lat, 0.0)),
