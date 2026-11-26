@@ -70,7 +70,8 @@ def ecef_to_geodetic(x: float, y: float, z: float) -> tuple[float, float, float]
     (90.0, 0.0, -b). Longitude is in (-180, 180].
 
     This scalar form raises no new error: a non-finite input gives a
-    non-finite output, as before. RF code uses ecef_to_geodetic_vec().
+    non-finite output, as before, and a NaN in any input gives NaN in all
+    three outputs. RF code uses ecef_to_geodetic_vec().
 
     Args:
         x, y, z: ECEF position in metres
@@ -78,6 +79,8 @@ def ecef_to_geodetic(x: float, y: float, z: float) -> tuple[float, float, float]
     Returns:
         Tuple of (latitude_deg, longitude_deg, altitude_m)
     """
+    if math.isnan(x) or math.isnan(y) or math.isnan(z):
+        return math.nan, math.nan, math.nan
     p = math.hypot(x, y)
     if p == 0.0:
         lat_deg = 90.0 if z >= 0 else -90.0
@@ -297,6 +300,21 @@ def lvlh_reference_velocity(
     return vx - OMEGA_EARTH_RAD_S * y, vy + OMEGA_EARTH_RAD_S * x, vz
 
 
+def _inertial_speed_band_km_s(radius_km):
+    """The bound-orbit speed band (lo, hi) in km/s at radius_km; NaN where radius_km <= 0.
+
+    The one copy of the band: check_inertial_speed_km_s() and
+    lvlh_reference_velocity_m_vec() both use it. Takes a float or an array.
+    """
+    r = np.asarray(radius_km, dtype=np.float64)
+    positive = r > 0.0
+    safe = np.where(positive, r, 1.0)
+    with np.errstate(over="ignore", invalid="ignore"):  # as the old float arithmetic: inf, no warning
+        lo = np.sqrt(_MU_KM3_S2 * (2.0 / safe - 2.0 / (safe + _R_EARTH_MEAN_KM))) * 0.98
+        hi = np.sqrt(2.0 * _MU_KM3_S2 / safe) * 1.02
+    return np.where(positive, lo, np.nan), np.where(positive, hi, np.nan)
+
+
 def check_inertial_speed_km_s(
     r_ecef_km: tuple[float, float, float],
     v_ref_km_s: tuple[float, float, float],
@@ -316,8 +334,8 @@ def check_inertial_speed_km_s(
     r = math.sqrt(x * x + y * y + z * z)
     vx, vy, vz = v_ref_km_s
     speed = math.sqrt(vx * vx + vy * vy + vz * vz)
-    lo = math.sqrt(_MU_KM3_S2 * (2.0 / r - 2.0 / (r + _R_EARTH_MEAN_KM))) * 0.98 if r > 0 else math.nan
-    hi = math.sqrt(2.0 * _MU_KM3_S2 / r) * 1.02 if r > 0 else math.nan
+    band_lo, band_hi = _inertial_speed_band_km_s(r)
+    lo, hi = float(band_lo), float(band_hi)
     if not (lo <= speed <= hi):
         message = (
             f"{FRAME_VELOCITY_UNITS_ERROR}: inertial speed {speed:.6g} km/s at r = {r:.6g} km is outside "
@@ -604,13 +622,13 @@ def look_angles_ecef_vec(sat_m, ground_m, lat_deg, lon_deg) -> tuple[np.ndarray,
     )
     _check_latitude("lat_deg", lat)
     dx, dy, dz = _components(sat, ground)
-    range_m = np.sqrt(dx * dx + dy * dy + dz * dz)
-    if not np.all(np.isfinite(range_m)):  # finite inputs beyond ~1e154 m: overflow-safe norm
-        range_m = np.hypot(np.hypot(dx, dy), dz)
+    # hypot neither overflows nor underflows for finite inputs (beyond ~1e154 m or
+    # below ~1e-154 m a sum of squares would).
+    range_m = np.hypot(np.hypot(dx, dy), dz)
     if np.any(range_m == 0.0):
         raise ValueError("sat_m and ground_m must not coincide (zero range)")
     east, north, up = _project_enu(dx, dy, dz, lat, lon)
-    horizontal = np.sqrt(east * east + north * north)
+    horizontal = np.hypot(east, north)
     elevation = np.degrees(np.arctan2(up, horizontal))
     azimuth = np.degrees(np.arctan2(east, north))
     azimuth = np.where(azimuth < 0.0, azimuth + 360.0, azimuth)
@@ -754,8 +772,7 @@ def lvlh_reference_velocity_m_vec(r_ecef_m, vrel_mps) -> np.ndarray:
         v_km = v_ref[moving] / 1000.0
         radius = np.sqrt(np.sum(r_km * r_km, axis=-1))
         speed = np.sqrt(np.sum(v_km * v_km, axis=-1))
-        lo = np.sqrt(_MU_KM3_S2 * (2.0 / radius - 2.0 / (radius + _R_EARTH_MEAN_KM))) * 0.98
-        hi = np.sqrt(2.0 * _MU_KM3_S2 / radius) * 1.02
+        lo, hi = _inertial_speed_band_km_s(radius)
         bad = ~((lo <= speed) & (speed <= hi))
         for index in np.flatnonzero(bad):
             # The scalar check builds and logs the same message as every other frame path.

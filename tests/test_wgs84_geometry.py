@@ -502,3 +502,74 @@ def test_g03_appendix_b_slant_ranges(lat, el, az, expected_range):
         assert circular_deg(got_az, az) <= 1e-6
     vec = look_angles_ecef_vec(np.array(sat), np.array(ground), lat, 30.0)
     assert abs(float(vec[0]) - rng) <= 1e-3 and abs(float(vec[1]) - got_el) <= 1e-6
+
+
+# ---------------------------------------------------------------- the vertical threshold (section 6.1.4)
+# At latitude 0, longitude 0 the axes are exactly E = +y, N = +z, U = +x, so a satellite at
+# ground + (1, h, 0) m has range sqrt(1 + h^2) = 1.0 in float64 and a horizontal part of h.
+VERTICAL_GROUND = (WGS84_A_M, 0.0, 0.0)
+
+
+@pytest.mark.parametrize("up", [1.0, -1.0])
+@pytest.mark.parametrize(
+    ("h", "vertical"),
+    [
+        (0.9e-12, True),  # a little under 1e-12 of the range
+        (1e-12, True),  # exactly 1e-12 of the range: "at most" is inclusive
+        (1.1e-12, False),  # a little over
+        (1e-9, False),
+    ],
+)
+def test_g03_vertical_threshold_on_each_side_and_at_the_boundary(h, vertical, up):
+    sat = (WGS84_A_M + up, h, 0.0)
+    expected_el = math.degrees(math.atan2(up, h))  # the ordinary angles, from E = h, N = 0
+    scalar = look_angles_ecef(sat, VERTICAL_GROUND, 0.0, 0.0)
+    vector = tuple(float(v) for v in look_angles_ecef_vec(np.array(sat), np.array(VERTICAL_GROUND), 0.0, 0.0))
+    for rng, el, az in (scalar, vector):
+        assert rng == 1.0
+        if vertical:
+            assert el == math.copysign(90.0, up) and az == 0.0
+        else:
+            assert el == pytest.approx(expected_el, abs=1e-12) and el != math.copysign(90.0, up)
+            assert az == 90.0
+
+
+def test_g03_vertical_threshold_in_one_vector_call():
+    hs = np.array([0.9e-12, 1e-12, 1.1e-12])
+    sat = np.stack([np.full(3, WGS84_A_M + 1.0), hs, np.zeros(3)], axis=-1)
+    _, el, az = look_angles_ecef_vec(sat, VERTICAL_GROUND, 0.0, 0.0)
+    np.testing.assert_array_equal(az, [0.0, 0.0, 90.0])
+    assert el[0] == 90.0 and el[1] == 90.0 and el[2] < 90.0
+
+
+def test_g03_near_overhead_pass_keeps_its_angles():
+    """A satellite 0.15 deg off the zenith of a 45 deg N ground point is not reported vertical."""
+    sat, _ = ref.satellite_at(45.0, 30.0, 89.85, 120.0, 550e3)
+    ground = ref.forward(45.0, 30.0, 0.0)
+    _, el, az = look_angles_ecef(sat, ground, 45.0, 30.0)
+    assert el == pytest.approx(89.85, abs=1e-6)
+    assert circular_deg(az, 120.0) <= 1e-6
+
+
+# ---------------------------------------------------------------- overflow and underflow (section 6.1.4)
+@pytest.mark.parametrize("scale", [1e-170, 1e-160, 1e160, 1e200, 1e300])
+def test_g03_look_angles_at_extreme_finite_distances(scale):
+    # At latitude 0, longitude 0 from the geocentre: E = dy, N = dz, U = dx.
+    sat = (scale, scale, 0.0)
+    for rng, el, az in (
+        look_angles_ecef(sat, (0.0, 0.0, 0.0), 0.0, 0.0),
+        tuple(float(v) for v in look_angles_ecef_vec(np.array(sat), np.zeros(3), 0.0, 0.0)),
+    ):
+        assert rng == pytest.approx(math.sqrt(2.0) * scale, rel=1e-15)
+        assert el == pytest.approx(45.0, abs=1e-12)
+        assert az == pytest.approx(90.0, abs=1e-12)
+
+
+def test_g01_scalar_inverse_gives_all_nan_for_a_nan_in_any_input():
+    nan, inf = float("nan"), float("inf")
+    for xyz in ((nan, 0.0, 0.0), (0.0, nan, 0.0), (0.0, 0.0, nan), (inf, nan, 1.0), (7e6, 0.0, nan)):
+        assert all(math.isnan(v) for v in ecef_to_geodetic(*xyz)), xyz
+    # Infinite but not NaN inputs keep today's result.
+    assert ecef_to_geodetic(0.0, 0.0, inf) == (90.0, 0.0, inf)
+    assert ecef_to_geodetic(0.0, 0.0, -inf) == (-90.0, 0.0, inf)
+    assert ecef_to_geodetic(np.float64(7e6), 0, np.float32(0.0))[1] == 0.0  # NumPy and int scalars still work

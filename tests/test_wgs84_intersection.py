@@ -325,3 +325,35 @@ def _elevation(sat, ground):
     los = [s - g for s, g in zip(sat, ground)]
     rng = math.sqrt(ref.dot(los, los))
     return rng, math.degrees(math.asin(ref.dot(los, up) / rng)), None
+
+
+
+def test_g04_surface_tangent_has_no_zero_distance_hit():
+    """Section 6.1.6 items 4 and 6: from (a, 0, 0) along +y the only root is exactly zero.
+
+    Either classification of the tangent is allowed; a returned hit needs a finite
+    distance strictly greater than zero.
+    """
+    origin, direction = (WGS84_A_M, 0.0, 0.0), (0.0, 1.0, 0.0)
+    result = intersect_ray_wgs84(origin, direction)
+    if result is not None:
+        _, distance = result
+        assert math.isfinite(distance) and distance > 0.0
+    _, distance, is_hit = intersect_ray_wgs84_vec(np.array([origin, (7e6, 0.0, 0.0)]), np.array([direction, (-1.0, 0.0, 0.0)]))
+    assert bool(is_hit[1])
+    if bool(is_hit[0]):
+        assert math.isfinite(float(distance[0])) and float(distance[0]) > 0.0
+
+
+def test_g04_a_near_root_below_a_millimetre_is_returned():
+    """Section 6.1.6 item 5: no minimum hit distance."""
+    origin = (WGS84_A_M + 1e-4, 0.0, 0.0)
+    expected = origin[0] - WGS84_A_M  # exact in float64: about 1.00000065e-4 m
+    for result in (
+        intersect_ray_wgs84(origin, (-1.0, 0.0, 0.0)),
+        intersect_ray_wgs84_vec(np.array([origin]), np.array([(-1.0, 0.0, 0.0)])),
+    ):
+        assert result is not None
+        distance = float(np.ravel(result[1])[0])
+        assert 0.0 < distance < 1e-3
+        assert distance == pytest.approx(expected, abs=1e-9)

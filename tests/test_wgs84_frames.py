@@ -15,6 +15,7 @@ import wgs84_reference as ref
 from astra_shared.geo_math import (
     FRAME_VELOCITY_UNITS_ERROR,
     OMEGA_EARTH_RAD_S,
+    check_inertial_speed_km_s,
     lvlh_reference_velocity,
     lvlh_reference_velocity_m,
     lvlh_reference_velocity_m_vec,
@@ -161,3 +162,76 @@ def test_inclined_geo_keeps_its_northward_component():
     v_ref = lvlh_reference_velocity_m(r, vrel)
     assert v_ref[2] == 50.0
     assert v_ref[1] == pytest.approx(OMEGA_EARTH_RAD_S * r[0], abs=1e-9)
+
+
+# ---------------------------------------------------------------- the speed band edges (section 6.1.7)
+# The band, computed here from its definition: from the apogee speed of an orbit whose
+# perigee touches the 6371 km sphere, sqrt(mu (2/r - 2/(r + R))), to the escape speed
+# sqrt(2 mu / r), with 2 % margins.
+MU_KM3_S2 = 398600.4418
+R_MEAN_KM = 6371.0
+EDGE = 1e-9  # relative step either side of an edge; far above the float64 rounding
+
+
+def band_km_s(r_km):
+    return (
+        math.sqrt(MU_KM3_S2 * (2.0 / r_km - 2.0 / (r_km + R_MEAN_KM))) * 0.98,
+        math.sqrt(2.0 * MU_KM3_S2 / r_km) * 1.02,
+    )
+
+
+def vrel_for_speed_mps(r_m, speed_km_s):
+    """An Earth-relative velocity at (r_m, 0, 0) whose v_ref is (0, 0, speed): omega x r is +y."""
+    return (0.0, -OMEGA_EARTH_RAD_S * r_m, speed_km_s * 1000.0)
+
+
+def edge_cases(r_km):
+    lo, hi = band_km_s(r_km)
+    return [
+        (lo * (1.0 + EDGE), True),
+        (lo * (1.0 - EDGE), False),
+        (hi * (1.0 - EDGE), True),
+        (hi * (1.0 + EDGE), False),
+    ]
+
+
+@pytest.mark.parametrize("r_km", [6928.137, 26571.0, 42164.0])
+def test_vector_frame_velocity_band_just_inside_and_outside_each_edge(r_km):
+    r_m = r_km * 1000.0
+    for speed, accepted in edge_cases(r_km):
+        vrel = vrel_for_speed_mps(r_m, speed)
+        # The edge row is second, after an in-band row, so a per-row slip shows.
+        r = np.array([LEO_R_M, (r_m, 0.0, 0.0)])
+        v = np.array([LEO_VREL_MPS, vrel])
+        if accepted:
+            got = lvlh_reference_velocity_m_vec(r, v)
+            assert np.linalg.norm(got[1]) / 1000.0 == pytest.approx(speed, rel=1e-12)
+        else:
+            with pytest.raises(ValueError, match=f"^{FRAME_VELOCITY_UNITS_ERROR}"):
+                lvlh_reference_velocity_m_vec(r, v)
+        # The scalar m/s entry and the km/s check agree with the vector path.
+        if accepted:
+            lvlh_reference_velocity_m((r_m, 0.0, 0.0), vrel)
+            check_inertial_speed_km_s((r_km, 0.0, 0.0), (0.0, 0.0, speed))
+        else:
+            with pytest.raises(ValueError, match=f"^{FRAME_VELOCITY_UNITS_ERROR}"):
+                lvlh_reference_velocity_m((r_m, 0.0, 0.0), vrel)
+            with pytest.raises(ValueError, match=f"^{FRAME_VELOCITY_UNITS_ERROR}"):
+                check_inertial_speed_km_s((r_km, 0.0, 0.0), (0.0, 0.0, speed))
+
+
+def test_km_s_velocity_given_as_m_s_is_refused_at_a_gps_like_radius():
+    """3.87 km/s passed as 3.87 m/s at 26,571 km: the rebuilt speed is 1.94 km/s, below the band."""
+    r = np.array([[26571e3, 0.0, 0.0]])
+    v = np.array([[0.0, 0.0, 3.87]])
+    lo, _ = band_km_s(26571.0)
+    assert np.linalg.norm(v[0] + (0.0, OMEGA_EARTH_RAD_S * 26571e3, 0.0)) / 1000.0 < lo
+    with pytest.raises(ValueError, match=f"^{FRAME_VELOCITY_UNITS_ERROR}"):
+        lvlh_reference_velocity_m_vec(r, v)
+
+
+def test_a_radius_that_rounds_to_zero_fails_the_speed_check():
+    with pytest.raises(ValueError, match=f"^{FRAME_VELOCITY_UNITS_ERROR}"):
+        check_inertial_speed_km_s((0.0, 0.0, 0.0), (1.0, 0.0, 0.0))
+    with pytest.raises(ValueError, match=f"^{FRAME_VELOCITY_UNITS_ERROR}"):
+        lvlh_reference_velocity_m_vec(np.array([[5e-324, 0.0, 0.0]]), np.array([[1.0, 0.0, 0.0]]))
