@@ -1,9 +1,5 @@
 """Conformance tests for the shared part of the frozen A0 API (A0 plan v7, Section 6.1).
 
-Copied from the stand-in master (astra-shared branch ``a0-standin``,
-``a0_standin/tests/test_a0_geo_math_contract.py``) with the stand-in modes
-removed, as WP1 requires (plan Section 6.6): this copy tests only the real module.
-
 Expected values come from published controls or from small independent
 calculations in this file, never from the module under test.
 """
