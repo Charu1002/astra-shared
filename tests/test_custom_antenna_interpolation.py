@@ -136,3 +136,57 @@ def test_vectorized_lookup_matches_scalar_pointwise():
 def test_none_payload_runtime_guard_returns_zero():
     assert lookup_custom_gain_db(10.0, 20.0, None) == 0.0
     assert lookup_custom_gain_db_array([10.0], [20.0], None).tolist() == [0.0]
+
+
+# G10 (A0 plan v7, section 10.3): merged Shared #89 tail behaviour with a
+# non-flat final psi row, scalar/vector parity and broadcast parity.
+
+
+def _tail_payload():
+    return {
+        "enabled": True,
+        "source_format": "csv",
+        "frequency_hz": 12_000_000_000,
+        "psi_deg": [0.0, 10.0, 20.0],
+        "phi_deg": [0.0, 90.0, 180.0, 270.0],
+        "gain_dbi": [
+            [30.0, 30.0, 30.0, 30.0],
+            [10.0, 12.0, 14.0, 12.0],
+            [-20.0, -24.0, -28.0, -24.0],
+        ],
+        "validation": {"is_valid": True, "errors": [], "warnings": []},
+    }
+
+
+@pytest.mark.parametrize("psi", [20.0, 20.0000001, 45.0, 179.9])
+@pytest.mark.parametrize(
+    ("phi", "expected"),
+    [(0.0, -20.0), (45.0, -22.0), (135.0, -26.0), (270.0, -24.0), (315.0, -22.0)],
+)
+def test_g10_at_and_beyond_the_final_row_interpolates_phi_in_that_row(psi, phi, expected):
+    payload = _tail_payload()
+    assert lookup_custom_gain_db(psi, phi, payload) == pytest.approx(expected, abs=1e-12)
+    assert float(lookup_custom_gain_db_array(psi, phi, payload)) == pytest.approx(expected, abs=1e-12)
+
+
+def test_g10_below_the_first_row_uses_the_first_row():
+    payload = _tail_payload()
+    assert lookup_custom_gain_db(-5.0, 45.0, payload) == pytest.approx(30.0)
+    assert float(lookup_custom_gain_db_array(-5.0, 45.0, payload)) == pytest.approx(30.0)
+
+
+def test_g10_in_range_values_are_kept():
+    payload = _tail_payload()
+    # Midway between psi 10 and 20 at phi 45: rows give 11 and -22.
+    assert lookup_custom_gain_db(15.0, 45.0, payload) == pytest.approx(-5.5, abs=1e-12)
+
+
+def test_g10_broadcast_vector_matches_scalar_pointwise():
+    payload = _tail_payload()
+    psi = [[-5.0], [5.0], [15.0], [20.0], [60.0]]
+    phi = [[0.0, 45.0, 90.0, 200.0, 315.0, 359.0]]
+    result = lookup_custom_gain_db_array(psi, phi, payload)
+    assert result.shape == (5, 6)
+    for i, row in enumerate(psi):
+        for j, phi_value in enumerate(phi[0]):
+            assert result[i, j] == pytest.approx(lookup_custom_gain_db(row[0], phi_value, payload), abs=1e-12)
