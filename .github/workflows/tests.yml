@@ -38,11 +38,14 @@ jobs:
         run: python -m pytest tests/ -v
 
       # A0 plan v7, section 8.1 and G06: the installed wheel, not the checkout,
-      # provides astra_shared, and it carries the A0 WGS84 API.
-      - name: Clean wheel install and import
+      # provides astra_shared, and it carries the A0 WGS84 API. The check runs from
+      # outside the checkout with the wheel's interpreter: the API inventory and
+      # numerical controls (a ray hit and its distance, look angles, an inverse
+      # round trip). A missing name or a wrong result fails the job.
+      - name: Clean wheel install and behaviour check
         run: |
           python -m pip wheel . --no-deps -w dist
           python -m venv /tmp/wheel-env
           /tmp/wheel-env/bin/pip install dist/*.whl
           cd /tmp
-          /tmp/wheel-env/bin/python -c "import astra_shared, astra_shared.geo_math as g; assert astra_shared.__file__.startswith('/tmp/wheel-env/'), astra_shared.__file__; g.intersect_ray_wgs84_vec([[8e7, 0, 0]], [[-1, 0, 0]]); print('wheel import OK:', astra_shared.__file__)"
+          /tmp/wheel-env/bin/python "$GITHUB_WORKSPACE/tools/check_installed_wheel.py" /tmp/wheel-env/
