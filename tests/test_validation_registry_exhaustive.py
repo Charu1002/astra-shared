@@ -79,6 +79,7 @@ _PARSER_FIXTURES = [
     {**_EARTH_FIXED, "debug_target_reachability": True},
     {**_EARTH_FIXED, "targets_json": "not json"},
     {**_EARTH_FIXED, "targets": {"not": "a list"}},
+    {**_EARTH_FIXED, "targets": [{**_TARGET, "target_id": f"T{i}"} for i in range(1_001)]},
     {**_EARTH_FIXED, "targets": ["not an object"]},
     {**_EARTH_FIXED, "targets": [{**_TARGET, "target_id": "  "}]},
     {

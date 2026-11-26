@@ -65,6 +65,7 @@ _VALIDATION_MESSAGES = {
     "invalid_targets_json": ("targets_json", "Targets JSON is malformed."),
     "targets_invalid": ("targets", "Targets must be a list."),
     "targets_not_list": ("targets", "Targets must be a list."),
+    "targets_too_many": ("targets", "A run can have at most 1,000 Earth-Fixed targets."),
     "target_invalid": ("targets", "Each target must be an object."),
     "target_not_object": ("targets", "Each target must be an object."),
     "target_id_invalid": ("target_id", "Target ID must not be blank."),

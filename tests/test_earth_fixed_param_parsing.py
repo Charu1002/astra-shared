@@ -301,6 +301,23 @@ def test_empty_string_targets_is_not_a_list():
     assert "targets_not_list" in parsed["rf_param_errors"]
 
 
+def test_target_cap_is_1000():
+    """Decision D8 (astra-ui-app#157): 1,000 targets parse, 1,001 is one error."""
+    from astra_shared.param_parsing import MAX_EARTH_FIXED_TARGETS
+
+    assert MAX_EARTH_FIXED_TARGETS == 1_000
+    at_cap = [target(1, 2, target_id=f"t{i}") for i in range(1_000)]
+    parsed = parse_rf_params({"pointing_mode": "earth_fixed", "targets": at_cap}, collect_errors=True)
+    assert parsed["rf_param_errors"] == []
+    assert len(parsed["targets"]) == 1_000
+
+    over = at_cap + [target(1, 2, target_id="t1000"), {"bad": "row"}]
+    for key, value in (("targets", over), ("targets_json", json.dumps(over))):
+        parsed = parse_rf_params({"pointing_mode": "earth_fixed", key: value}, collect_errors=True)
+        assert "targets_too_many" in parsed["rf_param_errors"]
+        assert "target_not_object" not in parsed["rf_param_errors"]
+
+
 def test_generated_id_that_collides_with_a_later_explicit_id_is_a_duplicate():
     parsed = parse_rf_params(
         {

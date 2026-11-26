@@ -617,6 +617,12 @@ def _parse_min_elevation_deg(params: dict, default: float) -> tuple[float, str |
     return _parse_bounded_float(params, key, default, 0.0, 90.0, key)
 
 
+# Ceiling on Earth-Fixed targets in one run (astra-shared#49 / astra-ui-app#157,
+# decision D8). One rule for the GUI, the engines and the CLI batch tool; the
+# UI form and its run-list upload use the same number.
+MAX_EARTH_FIXED_TARGETS = 1_000
+
+
 def _canonicalize_targets(params: dict, errors: list[str]) -> list[dict]:
     """Decode and normalize the two supported target input representations."""
     sources = []
@@ -633,6 +639,10 @@ def _canonicalize_targets(params: dict, errors: list[str]) -> list[dict]:
     for source in sources:
         if not isinstance(source, list):
             errors.append("targets_not_list")
+            continue
+        if len(source) > MAX_EARTH_FIXED_TARGETS:
+            # One error for the whole list, not one per row.
+            errors.append("targets_too_many")
             continue
         used_ids: set[str] = set()
         canonical = []
