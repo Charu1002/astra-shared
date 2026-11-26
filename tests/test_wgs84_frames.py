@@ -235,3 +235,14 @@ def test_a_radius_that_rounds_to_zero_fails_the_speed_check():
         check_inertial_speed_km_s((0.0, 0.0, 0.0), (1.0, 0.0, 0.0))
     with pytest.raises(ValueError, match=f"^{FRAME_VELOCITY_UNITS_ERROR}"):
         lvlh_reference_velocity_m_vec(np.array([[5e-324, 0.0, 0.0]]), np.array([[1.0, 0.0, 0.0]]))
+
+
+
+def test_zero_position_raises_even_against_an_empty_velocity():
+    """Sections 6.1.1 and 6.1.7: a supplied zero position is refused before broadcasting."""
+    for vrel in (np.empty((0, 3)), np.array([[1.0, 0.0, 0.0]]), (0.0, 0.0, 0.0)):
+        with pytest.raises(ValueError, match="r_ecef_m must be non-zero"):
+            lvlh_reference_velocity_m_vec((0.0, 0.0, 0.0), vrel)
+    # Genuinely empty valid calls stay empty; a zero vrel is valid (the stationary branch).
+    assert lvlh_reference_velocity_m_vec(np.empty((0, 3)), (0.0, 0.0, 0.0)).shape == (0, 3)
+    assert lvlh_reference_velocity_m_vec(LEO_R_M, np.empty((0, 3))).shape == (0, 3)

@@ -357,3 +357,36 @@ def test_g04_a_near_root_below_a_millimetre_is_returned():
         distance = float(np.ravel(result[1])[0])
         assert 0.0 < distance < 1e-3
         assert distance == pytest.approx(expected, abs=1e-9)
+
+
+
+def test_g04_interior_ray_with_a_small_positive_first_root():
+    """Section 6.1.6 item 5: a hit 0.37 m along a ray from just inside the surface is returned.
+
+    Origin (a - 1e-8, 0, 0) m, direction (-1e-9, 1, 0): the only positive root is about
+    0.367934 m. Near the surface from inside, the float64 root carries a cancellation
+    error of about 4e-4 m, inside the 1e-3 m budget of item 7.
+    """
+    origin, direction = (WGS84_A_M - 1e-8, 0.0, 0.0), (-1e-9, 1.0, 0.0)
+    expected_hit, expected = decimal_first_hit(origin, direction)
+    assert expected == pytest.approx(0.367934, abs=1e-6)
+    result = intersect_ray_wgs84(origin, direction)
+    assert result is not None
+    hit, distance = result
+    assert distance == pytest.approx(expected, abs=HIT_TOL_M)
+    assert hit == pytest.approx(expected_hit, abs=HIT_TOL_M)
+    _, vec_distance, vec_is_hit = intersect_ray_wgs84_vec(np.array([origin]), np.array([direction]))
+    assert bool(vec_is_hit[0])
+    assert float(vec_distance[0]) == pytest.approx(expected, abs=HIT_TOL_M)
+
+
+def test_g04_zero_direction_raises_even_against_an_empty_origin():
+    """Sections 6.1.1 and 6.1.6: a supplied zero direction is refused before broadcasting."""
+    for origin in (np.empty((0, 3)), np.array([[7e6, 0.0, 0.0]]), (7e6, 0.0, 0.0)):
+        with pytest.raises(ValueError, match="direction must be non-zero"):
+            intersect_ray_wgs84_vec(origin, (0.0, 0.0, 0.0))
+    # Genuinely empty valid calls stay empty.
+    hit, distance, is_hit = intersect_ray_wgs84_vec(np.empty((0, 3)), (-1.0, 0.0, 0.0))
+    assert hit.shape == (0, 3) and distance.shape == (0,) and is_hit.shape == (0,)
+    hit, distance, is_hit = intersect_ray_wgs84_vec((7e6, 0.0, 0.0), np.empty((0, 3)))
+    assert hit.shape == (0, 3) and distance.shape == (0,) and is_hit.shape == (0,)

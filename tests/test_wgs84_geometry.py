@@ -565,11 +565,68 @@ def test_g03_look_angles_at_extreme_finite_distances(scale):
         assert az == pytest.approx(90.0, abs=1e-12)
 
 
-def test_g01_scalar_inverse_gives_all_nan_for_a_nan_in_any_input():
+def test_g01_scalar_inverse_nan_inputs_behave_as_today():
     nan, inf = float("nan"), float("inf")
-    for xyz in ((nan, 0.0, 0.0), (0.0, nan, 0.0), (0.0, 0.0, nan), (inf, nan, 1.0), (7e6, 0.0, nan)):
+    # A NaN in x or y gives NaN in all three outputs.
+    for xyz in ((nan, 0.0, 0.0), (0.0, nan, 0.0), (inf, nan, 1.0), (nan, 7e6, nan)):
         assert all(math.isnan(v) for v in ecef_to_geodetic(*xyz)), xyz
-    # Infinite but not NaN inputs keep today's result.
+    # A NaN in z alone keeps the computable longitude.
+    for xyz, lon in (
+        ((6378137.0, 0.0, nan), 0.0),
+        ((-7e6, 1e6, nan), math.degrees(math.atan2(1e6, -7e6))),  # 171.87 deg
+        ((0.0, 0.0, nan), 0.0),
+        ((inf, inf, nan), 45.0),
+        ((-7e6, -0.0, nan), 180.0),  # with the section 6.1.3 fold of -180 to 180
+    ):
+        lat, got_lon, h = ecef_to_geodetic(*xyz)
+        assert math.isnan(lat) and math.isnan(h) and got_lon == lon, xyz
+    assert ecef_to_geodetic(-7e6, 1e6, nan)[1] == pytest.approx(171.869898, abs=1e-6)
+    # Infinite but not NaN inputs keep today's result, with the section 6.1.3 polar-axis branch.
     assert ecef_to_geodetic(0.0, 0.0, inf) == (90.0, 0.0, inf)
     assert ecef_to_geodetic(0.0, 0.0, -inf) == (-90.0, 0.0, inf)
     assert ecef_to_geodetic(np.float64(7e6), 0, np.float32(0.0))[1] == 0.0  # NumPy and int scalars still work
+
+
+def _todays_scalar_inverse(x, y, z):
+    """The scalar inverse of shared main before A0 (0ba3c35), kept here as the reference for 'as today'."""
+    a, e2 = 6378137.0, 6.69437999014e-3
+    b = a * math.sqrt(1 - e2)
+    ep2 = (a * a - b * b) / (b * b)
+    p = math.sqrt(x * x + y * y)
+    lon = 0.0 if p == 0 else math.atan2(y, x)
+    theta = math.atan2(z * a, p * b)
+    st, ct = math.sin(theta), math.cos(theta)
+    lat = math.atan2(z + ep2 * b * st**3, p - e2 * a * ct**3)
+    sin_lat = math.sin(lat)
+    n = a / math.sqrt(1 - e2 * sin_lat * sin_lat)
+    return math.degrees(lat), math.degrees(lon), p / math.cos(lat) - n
+
+
+def test_g01_scalar_inverse_non_finite_triples_match_today_but_for_the_listed_changes():
+    """Section 6.1.3: a non-finite input behaves as today, except for the three listed changes.
+
+    The changes are the polar-axis branch (x = y = 0 with a signed z), the height
+    formula and the fold of a -180 longitude to 180.
+    """
+
+    def same(u, v):
+        return (math.isnan(u) and math.isnan(v)) or u == v
+
+    values = [math.nan, math.inf, -math.inf, 0.0, -0.0, 1.0, -1.0, 6378137.0, -7e6, 1e6, 1e300]
+    unexplained = []
+    for xyz in itertools.product(values, repeat=3):
+        if all(math.isfinite(v) for v in xyz):
+            continue
+        got, today = ecef_to_geodetic(*xyz), _todays_scalar_inverse(*xyz)
+        if all(same(u, v) for u, v in zip(got, today)):
+            continue
+        x, y, _ = xyz
+        has_nan = any(math.isnan(v) for v in xyz)
+        polar = not has_nan and x == 0.0 and y == 0.0
+        fold = today[1] == -180.0 and got[1] == 180.0
+        lon_ok = same(got[1], today[1]) or fold
+        height_only = not has_nan and same(got[0], today[0]) and lon_ok
+        nan_z_fold = has_nan and fold and same(got[0], today[0]) and same(got[2], today[2])
+        if not (polar or height_only or nan_z_fold):
+            unexplained.append((xyz, got, today))
+    assert unexplained == []

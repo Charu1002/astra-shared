@@ -70,8 +70,9 @@ def ecef_to_geodetic(x: float, y: float, z: float) -> tuple[float, float, float]
     (90.0, 0.0, -b). Longitude is in (-180, 180].
 
     This scalar form raises no new error: a non-finite input gives a
-    non-finite output, as before, and a NaN in any input gives NaN in all
-    three outputs. RF code uses ecef_to_geodetic_vec().
+    non-finite output, as before: a NaN in x or y gives NaN in all three
+    outputs, and a NaN in z alone gives NaN latitude and height with the
+    longitude of (x, y) (0 when x = y = 0). RF code uses ecef_to_geodetic_vec().
 
     Args:
         x, y, z: ECEF position in metres
@@ -79,9 +80,13 @@ def ecef_to_geodetic(x: float, y: float, z: float) -> tuple[float, float, float]
     Returns:
         Tuple of (latitude_deg, longitude_deg, altitude_m)
     """
-    if math.isnan(x) or math.isnan(y) or math.isnan(z):
-        return math.nan, math.nan, math.nan
-    p = math.hypot(x, y)
+    if math.isfinite(x) and math.isfinite(y) and math.isfinite(z):
+        p = math.hypot(x, y)  # no overflow or underflow for finite input
+    else:
+        p = math.sqrt(x * x + y * y)  # a non-finite triple keeps today's result (section 6.1.3)
+    if math.isnan(z):  # as today: NaN latitude and height, the longitude of (x, y)
+        lon_deg = 0.0 if p == 0.0 else math.degrees(math.atan2(y, x))
+        return math.nan, (180.0 if lon_deg == -180.0 else lon_deg), math.nan
     if p == 0.0:
         lat_deg = 90.0 if z >= 0 else -90.0
         return lat_deg, 0.0, abs(z) - WGS84_B_M
@@ -728,7 +733,9 @@ def intersect_ray_wgs84_vec(origin_m, direction) -> tuple[np.ndarray, np.ndarray
     direction_arr = _cartesian("direction", direction)
     shape = _broadcast_shape(origin_m=origin.shape[:-1], direction=direction_arr.shape[:-1])
     origin = np.broadcast_to(origin, shape + (3,))
-    d = _scaled_unit("direction", np.broadcast_to(direction_arr, shape + (3,)))
+    # Normalise (and refuse a zero direction) before broadcasting, so a zero
+    # direction raises even when the other operand is empty.
+    d = np.broadcast_to(_scaled_unit("direction", direction_arr), shape + (3,))
     distance, is_hit = _ray_roots(origin, d)
     hit = origin + distance[..., np.newaxis] * d
     return _out(hit), _out(distance), np.asarray(is_hit, dtype=bool)
@@ -758,10 +765,11 @@ def lvlh_reference_velocity_m_vec(r_ecef_m, vrel_mps) -> np.ndarray:
     r = _cartesian("r_ecef_m", r_ecef_m)
     v = _cartesian("vrel_mps", vrel_mps)
     shape = _broadcast_shape(r_ecef_m=r.shape[:-1], vrel_mps=v.shape[:-1])
-    r = np.broadcast_to(r, shape + (3,))
-    v = np.broadcast_to(v, shape + (3,))
+    # Checked before broadcasting, so a zero position raises even when vrel is empty.
     if np.any(np.all(r == 0.0, axis=-1)):
         raise ValueError("r_ecef_m must be non-zero")
+    r = np.broadcast_to(r, shape + (3,))
+    v = np.broadcast_to(v, shape + (3,))
     omega_cross_r = np.stack(
         [-OMEGA_EARTH_RAD_S * r[..., 1], OMEGA_EARTH_RAD_S * r[..., 0], np.zeros(shape)], axis=-1
     )
