@@ -434,11 +434,27 @@ def _reduce_longitude(lon_deg: np.ndarray) -> np.ndarray:
 
 
 def _reduce_integers(arr: np.ndarray) -> np.ndarray:
-    """Integer longitudes outside [-180, 180] reduced modulo 360 in integer arithmetic."""
-    outside = (arr > 180) | (arr < -180)
-    if not np.any(outside):
-        return arr
-    return np.where(outside, np.mod(arr, 360), arr)
+    """Integer longitudes outside [-180, 180] reduced modulo 360 in integer arithmetic.
+
+    The array is widened first (unsigned to uint64, signed to int64), so a small dtype
+    such as uint8 can hold the divisor 360 and a uint64 value above the int64 range
+    keeps every bit.
+    """
+    if arr.dtype.kind == "u":
+        wide = arr.astype(np.uint64)
+        return np.where(wide > 180, np.mod(wide, np.uint64(360)), wide)
+    wide = arr.astype(np.int64)
+    return np.where((wide > 180) | (wide < -180), np.mod(wide, 360), wide)
+
+
+def _is_integral(value) -> bool:
+    return isinstance(value, (int, np.integer)) and not isinstance(value, (bool, np.bool_))
+
+
+def _reduce_integral(value) -> float:
+    """One integral longitude, reduced exactly when outside [-180, 180], as a float."""
+    number = int(value)
+    return float(number % 360 if not -180 <= number <= 180 else number)
 
 
 def _longitude_array(name: str, value) -> np.ndarray:
@@ -452,25 +468,26 @@ def _longitude_array(name: str, value) -> np.ndarray:
     floats (whose ints may exceed int64). Floats are unchanged. An explicitly supplied
     object array is still refused, as are bools, strings and the other non-numbers.
     """
-    if isinstance(value, (int, np.integer)) and not isinstance(value, (bool, np.bool_)):
-        number = int(value)
-        return _real_array(name, number % 360 if not -180 <= number <= 180 else number)
+    if _is_integral(value):
+        return _real_array(name, _reduce_integral(value))
     if isinstance(value, np.ndarray):
         return _real_array(name, _reduce_integers(value) if value.dtype.kind in "iu" else value)
     if isinstance(value, (list, tuple)):
+        # Read the leaves as objects, so neither a mixed int/float list (which NumPy would
+        # make float64) nor an int beyond int64 is converted before its reduction.
         try:
-            arr = np.asarray(value)
-        except (TypeError, ValueError, OverflowError):
-            arr = None
-        if arr is not None and arr.dtype.kind in "iu":
-            return _real_array(name, _reduce_integers(arr))
-        if arr is not None and arr.dtype == object:
-            flat = arr.ravel()
-            if all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in flat):
-                reduced = [
-                    float(v % 360) if isinstance(v, int) and not -180 <= v <= 180 else float(v) for v in flat
-                ]
-                return _real_array(name, np.array(reduced, dtype=np.float64).reshape(arr.shape))
+            leaves = np.asarray(value, dtype=object)
+        except (TypeError, ValueError):
+            leaves = None
+        if leaves is not None and leaves.size:
+            flat = leaves.ravel()
+            numeric = all(
+                isinstance(v, (int, float, np.integer, np.floating)) and not isinstance(v, (bool, np.bool_))
+                for v in flat
+            )
+            if numeric and any(_is_integral(v) for v in flat):
+                reduced = [_reduce_integral(v) if _is_integral(v) else float(v) for v in flat]
+                return _real_array(name, np.array(reduced, dtype=np.float64).reshape(leaves.shape))
     return _real_array(name, value)
 
 

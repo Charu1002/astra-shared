@@ -692,3 +692,38 @@ def test_g03_large_exact_integer_longitude_in_enu_and_look_angles():
     got = look_angles_ecef_vec(np.array([sat]), np.array([ground]), 10.0, np.array([BIG_ONE_DEG], dtype=np.int64))
     assert tuple(float(v[0]) for v in got) == pytest.approx(expected, abs=1e-9)
     assert look_angles_ecef(sat, geodetic_to_ecef(10.0, -80.0, 0.0), 10.0, 10**20)[0] > 0.0
+
+
+def _reduced_deg(n: int) -> float:
+    r = n % 360
+    return float(r - 360 if r > 180 else r)
+
+
+def test_g01_mixed_int_and_float_list_reduces_each_integer_exactly():
+    """NumPy makes [int, float] a float64 array, which would round the integer first."""
+    got = geodetic_to_ecef_vec([0.0, 0.0, 0.0], [BIG_ONE_DEG, 1.0, 10**20], 0.0)
+    want = geodetic_to_ecef_vec([0.0, 0.0, 0.0], [1.0, 1.0, -80.0], 0.0)
+    for g, w in zip(got, want):
+        np.testing.assert_allclose(g, w, rtol=0.0, atol=1e-9)
+    east, _, _ = enu_basis_vec([10.0, 10.0], [BIG_ONE_DEG, 1.0])
+    np.testing.assert_allclose(east[0], east[1], atol=1e-15)
+
+
+@pytest.mark.parametrize(
+    ("values", "dtype"),
+    [
+        ([200, 255, 181], np.uint8),
+        ([-128, 127, 100], np.int8),
+        ([32767, -32768, 359], np.int16),
+        ([65535, 40000], np.uint16),
+        ([2**63 + 5, 2**64 - 1, 2**63 - 1], np.uint64),
+        ([-(2**63), 2**63 - 1], np.int64),
+    ],
+)
+def test_g01_every_integer_dtype_is_reduced_exactly(values, dtype):
+    """A small dtype can't hold the divisor 360, and uint64 exceeds int64: both are widened."""
+    arr = np.array(values, dtype=dtype)
+    got = geodetic_to_ecef_vec(np.zeros(len(values)), arr, 0.0)
+    want = geodetic_to_ecef_vec(np.zeros(len(values)), [_reduced_deg(v) for v in values], 0.0)
+    for g, w in zip(got, want):
+        np.testing.assert_allclose(g, w, rtol=0.0, atol=1e-9)
