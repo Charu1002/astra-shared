@@ -78,9 +78,16 @@ def main(prefix: str) -> None:
     hit, distance = result
     close(distance, 8e7 - A, 1e-6, "ray distance")
     close(hit[0], A, 1e-6, "ray hit x")
-    _, _, is_hit = g.intersect_ray_wgs84_vec([[8e7, 0.0, 0.0], [8e7, 0.0, 0.0]], [[-1.0, 0.0, 0.0], [1.0, 0.0, 0.0]])
+    hits, distances, is_hit = g.intersect_ray_wgs84_vec(
+        [[8e7, 0.0, 0.0], [8e7, 0.0, 0.0]], [[-1.0, 0.0, 0.0], [1.0, 0.0, 0.0]]
+    )
     if list(map(bool, is_hit)) != [True, False]:
         raise SystemExit(f"FAIL ray vector: is_hit {is_hit!r}, expected [True, False]")
+    for k, expected in enumerate((A, 0.0, 0.0)):
+        close(float(hits[0][k]), expected, 1e-6, f"ray vector hit[{k}]")
+    close(float(distances[0]), 8e7 - A, 1e-6, "ray vector distance")
+    if not (all(math.isnan(float(c)) for c in hits[1]) and math.isnan(float(distances[1]))):
+        raise SystemExit(f"FAIL ray vector miss: hit {hits[1]!r}, distance {distances[1]!r}, expected NaN")
 
     # Look angles: at latitude 0, longitude 0 the axes are E = +y, N = +z, U = +x.
     rng, el, az = g.look_angles_ecef((A + 1e6, 0.0, 1e6), (A, 0.0, 0.0), 0.0, 0.0)
@@ -100,7 +107,9 @@ def main(prefix: str) -> None:
     close(got[1], lon, 1e-6, "round-trip longitude")
     close(got[2], h, 1e-6, "round-trip height")
     vec = g.ecef_to_geodetic_vec(x, y, z)
-    close(float(vec[0]), got[0], 1e-12, "scalar and vector inverse parity")
+    close(float(vec[0]), got[0], 1e-12, "scalar and vector inverse parity (latitude)")
+    close(float(vec[1]), got[1], 1e-12, "scalar and vector inverse parity (longitude)")
+    close(float(vec[2]), got[2], 1e-6, "scalar and vector inverse parity (height)")
     close(g.ecef_to_geodetic(0.0, 0.0, B + 550e3)[2], 550e3, 1e-6, "polar-axis height")
 
     print(f"installed wheel OK: {astra_shared.__file__} ({len(FUNCTIONS)} functions, {len(CONSTANTS)} constants)")

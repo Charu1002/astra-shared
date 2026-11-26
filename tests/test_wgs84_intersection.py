@@ -365,7 +365,8 @@ def test_g04_interior_ray_with_a_small_positive_first_root():
 
     Origin (a - 1e-8, 0, 0) m, direction (-1e-9, 1, 0): the only positive root is about
     0.367934 m. Near the surface from inside, the float64 root carries a cancellation
-    error of about 4e-4 m, inside the 1e-3 m budget of item 7.
+    error of about 4e-4 m. The 1 mm tolerance here is this fixture's: section 6.1.6 item 7's
+    budget is for exterior origins at least 1 m above the surface.
     """
     origin, direction = (WGS84_A_M - 1e-8, 0.0, 0.0), (-1e-9, 1.0, 0.0)
     expected_hit, expected = decimal_first_hit(origin, direction)
@@ -390,3 +391,40 @@ def test_g04_zero_direction_raises_even_against_an_empty_origin():
     assert hit.shape == (0, 3) and distance.shape == (0,) and is_hit.shape == (0,)
     hit, distance, is_hit = intersect_ray_wgs84_vec((7e6, 0.0, 0.0), np.empty((0, 3)))
     assert hit.shape == (0, 3) and distance.shape == (0,) and is_hit.shape == (0,)
+
+
+
+@pytest.mark.parametrize("plane", ["equatorial", "polar"])
+@pytest.mark.parametrize("margin_rad", [1.5e-6, 3e-6, 1e-5, 1e-4])
+def test_g05_high_radius_grazing_rays_near_the_tangency_exclusion(plane, margin_rad):
+    """Origins at 1e8 m, rays 1.5e-6 to 1e-4 rad inside (hits) and outside (misses) the limb.
+
+    Section 6.1.6 item 7 excludes only rays within 1e-6 rad of tangency; the random G05 set
+    can't reach this edge because it keeps targets above 1 deg. In the plane of the origin
+    and the axis, the limb is at tan(alpha) = semi-axis / sqrt(R^2 - other semi-axis^2).
+    """
+    radius = 1.0e8
+    if plane == "equatorial":  # origin on +x, rays in the xy plane: a circle of radius a
+        origin, side_axis, along, across = (radius, 0.0, 0.0), WGS84_A_M, 0, 1
+        alpha = math.atan(WGS84_A_M / math.sqrt(radius**2 - WGS84_A_M**2))
+    else:  # origin over the north pole, rays in the xz plane: semi-axes a across, b along
+        origin, side_axis, along, across = (0.0, 0.0, radius), WGS84_A_M, 2, 0
+        alpha = math.atan(WGS84_A_M / math.sqrt(radius**2 - WGS84_B_M**2))
+    del side_axis
+    for theta, should_hit in ((alpha - margin_rad, True), (alpha + margin_rad, False)):
+        direction = [0.0, 0.0, 0.0]
+        direction[along] = -math.cos(theta)
+        direction[across] = math.sin(theta)
+        result = intersect_ray_wgs84(origin, direction)
+        reference = decimal_first_hit(origin, direction)
+        vec_hit, vec_distance, vec_is_hit = intersect_ray_wgs84_vec(np.array([origin]), np.array([direction]))
+        assert (result is not None) is should_hit and (reference is not None) is should_hit
+        assert bool(vec_is_hit[0]) is should_hit
+        if should_hit:
+            hit, distance = result
+            assert math.dist(hit, reference[0]) <= HIT_TOL_M
+            assert distance == pytest.approx(reference[1], abs=HIT_TOL_M)
+            assert abs(residual(hit)) <= RESIDUAL_TOL
+            assert float(vec_distance[0]) == pytest.approx(distance, abs=HIT_TOL_M)
+        else:
+            assert np.all(np.isnan(vec_hit)) and np.isnan(vec_distance[0])
