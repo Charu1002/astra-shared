@@ -630,3 +630,65 @@ def test_g01_scalar_inverse_non_finite_triples_match_today_but_for_the_listed_ch
         if not (polar or height_only or nan_z_fold):
             unexplained.append((xyz, got, today))
     assert unexplained == []
+
+
+# ---------------------------------------------------------------- integral longitudes (6.1.1, 6.1.3)
+# 360 * 2**45 + 1 is 1 deg, but a float64 cast rounds it to 360 * 2**45 (0 deg) before any
+# reduction. 10**20 is -80 deg and does not fit in int64.
+BIG_ONE_DEG = 360 * 2**45 + 1
+assert float(BIG_ONE_DEG) % 360.0 == 0.0  # the fixture loses the degree under a float cast
+
+
+def test_g01_large_exact_integer_longitude_keeps_its_degree_in_the_forward_conversion():
+    expected = geodetic_to_ecef_vec(0.0, 1.0, 0.0)
+    assert expected[1] == pytest.approx(111313.83923667614, abs=1e-6)
+    for lon in (BIG_ONE_DEG, np.int64(BIG_ONE_DEG), np.array([BIG_ONE_DEG, 1], dtype=np.int64), [BIG_ONE_DEG, 1]):
+        got = geodetic_to_ecef_vec(0.0, lon, 0.0)
+        for g, e in zip(got, expected):
+            np.testing.assert_allclose(g, np.broadcast_to(e, np.shape(g)), rtol=0.0, atol=1e-9)
+
+
+@pytest.mark.parametrize(("lon", "reduced"), [(10**20, -80.0), (-(10**20), 80.0), (2**1100 + 1, None)])
+def test_g01_python_ints_beyond_int64_are_reduced_exactly(lon, reduced):
+    if reduced is None:
+        reduced = float((2**1100 + 1) % 360)
+        reduced = reduced - 360.0 if reduced > 180.0 else reduced
+    for got, want in zip(geodetic_to_ecef_vec(10.0, lon, 0.0), geodetic_to_ecef_vec(10.0, reduced, 0.0)):
+        assert float(got) == pytest.approx(float(want), abs=1e-9)
+    # A Python sequence may mix such ints with floats.
+    got = geodetic_to_ecef_vec([10.0, 10.0], [lon, 2.5], 0.0)
+    np.testing.assert_allclose(got[1], [geodetic_to_ecef_vec(10.0, reduced, 0.0)[1], geodetic_to_ecef_vec(10.0, 2.5, 0.0)[1]], atol=1e-9)
+
+
+def test_g01_explicit_object_arrays_and_non_numbers_are_still_refused():
+    for bad in (np.array([10**20], dtype=object), np.array([1.0], dtype=object), [None, 1], ["1"], True):
+        with pytest.raises(ValueError):
+            geodetic_to_ecef_vec(0.0, bad, 0.0)
+
+
+def test_g01_integers_inside_the_range_and_floats_are_unchanged():
+    assert geodetic_to_ecef_vec(0.0, -180, 0.0) == geodetic_to_ecef_vec(0.0, -180.0, 0.0)
+    assert geodetic_to_ecef_vec(0.0, 181, 0.0) == geodetic_to_ecef_vec(0.0, -179.0, 0.0)
+    assert geodetic_to_ecef_vec(0.0, 3.6e11, 0.0) == geodetic_to_ecef_vec(0.0, 0.0, 0.0)
+
+
+def test_g03_large_exact_integer_longitude_in_enu_and_look_angles():
+    east_1, north_1, up_1 = enu_basis(10.0, 1.0)
+    for got, want in zip(enu_basis(10.0, BIG_ONE_DEG), (east_1, north_1, up_1)):
+        assert got == pytest.approx(want, abs=1e-15)
+    vec = enu_basis_vec(np.array([10.0]), np.array([BIG_ONE_DEG], dtype=np.int64))
+    np.testing.assert_allclose(vec[0][0], east_1, atol=1e-15)
+    delta = (1000.0, 2000.0, 3000.0)
+    assert ecef_delta_to_enu(delta, 10.0, BIG_ONE_DEG) == pytest.approx(ecef_delta_to_enu(delta, 10.0, 1.0), abs=1e-9)
+    np.testing.assert_allclose(
+        ecef_delta_to_enu_vec(np.array([delta]), 10.0, np.array([BIG_ONE_DEG], dtype=np.int64))[0],
+        ecef_delta_to_enu(delta, 10.0, 1.0)[0],
+        atol=1e-9,
+    )
+    ground = geodetic_to_ecef(10.0, 1.0, 0.0)
+    sat = geodetic_to_ecef(10.5, 1.4, 550e3)
+    expected = look_angles_ecef(sat, ground, 10.0, 1.0)
+    assert look_angles_ecef(sat, ground, 10.0, BIG_ONE_DEG) == pytest.approx(expected, abs=1e-9)
+    got = look_angles_ecef_vec(np.array([sat]), np.array([ground]), 10.0, np.array([BIG_ONE_DEG], dtype=np.int64))
+    assert tuple(float(v[0]) for v in got) == pytest.approx(expected, abs=1e-9)
+    assert look_angles_ecef(sat, geodetic_to_ecef(10.0, -80.0, 0.0), 10.0, 10**20)[0] > 0.0

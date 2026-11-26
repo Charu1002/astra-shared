@@ -356,8 +356,9 @@ def latlon_to_ecef(
 ) -> tuple[float, float, float]:
     """Convert lat/lon/altitude to ECEF Cartesian coordinates (km), spherical Earth model.
 
-    Returns (x, y, z) in km. Uses R=6371 km sphere — appropriate for RF link
-    budget geometry where sub-km accuracy is not required.
+    Returns (x, y, z) in km on the R = 6371 km sphere. Kept for non-RF compatibility only
+    (A0 plan v7, section 6.1.8): RF geometry uses the WGS84 entries, geodetic_to_ecef_vec()
+    or Radio's rf_geometry.satellite_ecef_m(), in metres.
     """
     R = 6371.0 + alt_km
     lat_rad = math.radians(lat_deg)
@@ -432,6 +433,55 @@ def _reduce_longitude(lon_deg: np.ndarray) -> np.ndarray:
     return np.where(outside, reduced, lon_deg)
 
 
+def _reduce_integers(arr: np.ndarray) -> np.ndarray:
+    """Integer longitudes outside [-180, 180] reduced modulo 360 in integer arithmetic."""
+    outside = (arr > 180) | (arr < -180)
+    if not np.any(outside):
+        return arr
+    return np.where(outside, np.mod(arr, 360), arr)
+
+
+def _longitude_array(name: str, value) -> np.ndarray:
+    """A longitude as a finite float64 array, reducing integral input exactly first.
+
+    The strict entries promise an exact reduction for any finite longitude (plan section
+    6.1.3), and accept Python ints and integer arrays (6.1.1). A float64 cast would round a
+    large integer before the reduction: 360 * 2**45 + 1 (1 deg) would become 0 deg. So an
+    integer outside [-180, 180] is reduced modulo 360 in integers before the cast: a Python
+    int of any size, an integer NumPy scalar or array, and a Python sequence of ints and
+    floats (whose ints may exceed int64). Floats are unchanged. An explicitly supplied
+    object array is still refused, as are bools, strings and the other non-numbers.
+    """
+    if isinstance(value, (int, np.integer)) and not isinstance(value, (bool, np.bool_)):
+        number = int(value)
+        return _real_array(name, number % 360 if not -180 <= number <= 180 else number)
+    if isinstance(value, np.ndarray):
+        return _real_array(name, _reduce_integers(value) if value.dtype.kind in "iu" else value)
+    if isinstance(value, (list, tuple)):
+        try:
+            arr = np.asarray(value)
+        except (TypeError, ValueError, OverflowError):
+            arr = None
+        if arr is not None and arr.dtype.kind in "iu":
+            return _real_array(name, _reduce_integers(arr))
+        if arr is not None and arr.dtype == object:
+            flat = arr.ravel()
+            if all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in flat):
+                reduced = [
+                    float(v % 360) if isinstance(v, int) and not -180 <= v <= 180 else float(v) for v in flat
+                ]
+                return _real_array(name, np.array(reduced, dtype=np.float64).reshape(arr.shape))
+    return _real_array(name, value)
+
+
+def _scalar_longitude(name: str, value) -> float:
+    """Scalar form of _longitude_array()."""
+    arr = _longitude_array(name, value)
+    if arr.ndim != 0:
+        raise ValueError(f"{name} must be a scalar for this entry; use the _vec form for arrays")
+    return float(arr)
+
+
 def _check_latitude(name: str, lat_deg: np.ndarray) -> None:
     if np.any(np.abs(lat_deg) > 90.0):
         raise ValueError(f"{name} must be within [-90, 90] degrees")
@@ -478,7 +528,7 @@ def geodetic_to_ecef_vec(lat_deg, lon_deg, alt_m) -> tuple[np.ndarray, np.ndarra
     outside [-180, 180] is reduced exactly before the trigonometry.
     """
     lat = _real_array("lat_deg", lat_deg)
-    lon = _real_array("lon_deg", lon_deg)
+    lon = _longitude_array("lon_deg", lon_deg)
     alt = _real_array("alt_m", alt_m)
     shape = _broadcast_shape(lat_deg=lat.shape, lon_deg=lon.shape, alt_m=alt.shape)
     _check_latitude("lat_deg", lat)
@@ -570,7 +620,7 @@ def enu_basis_vec(lat_deg, lon_deg) -> tuple[np.ndarray, np.ndarray, np.ndarray]
     a shape S; returns three arrays of shape S+(3,).
     """
     lat = _real_array("lat_deg", lat_deg)
-    lon = _real_array("lon_deg", lon_deg)
+    lon = _longitude_array("lon_deg", lon_deg)
     shape = _broadcast_shape(lat_deg=lat.shape, lon_deg=lon.shape)
     _check_latitude("lat_deg", lat)
     return _enu_axes(np.broadcast_to(lat, shape), np.broadcast_to(lon, shape))
@@ -579,7 +629,7 @@ def enu_basis_vec(lat_deg, lon_deg) -> tuple[np.ndarray, np.ndarray, np.ndarray]
 def enu_basis(lat_deg, lon_deg) -> tuple[tuple[float, float, float], ...]:
     """Scalar form of enu_basis_vec(): (east, north, up), three 3-tuples of floats."""
     lat = _scalar_angle("lat_deg", lat_deg)
-    lon = _scalar_angle("lon_deg", lon_deg)
+    lon = _scalar_longitude("lon_deg", lon_deg)
     east, north, up = enu_basis_vec(lat, lon)
     return _tuple3(east), _tuple3(north), _tuple3(up)
 
@@ -592,7 +642,7 @@ def ecef_delta_to_enu_vec(delta_m, lat_deg, lon_deg) -> tuple[np.ndarray, np.nda
     """
     delta = _cartesian("delta_m", delta_m)
     lat = _real_array("lat_deg", lat_deg)
-    lon = _real_array("lon_deg", lon_deg)
+    lon = _longitude_array("lon_deg", lon_deg)
     shape = _broadcast_shape(delta_m=delta.shape[:-1], lat_deg=lat.shape, lon_deg=lon.shape)
     _check_latitude("lat_deg", lat)
     east, north, up = _project_enu(delta[..., 0], delta[..., 1], delta[..., 2], lat, lon)
@@ -603,7 +653,7 @@ def ecef_delta_to_enu(delta_m, lat_deg, lon_deg) -> tuple[float, float, float]:
     """Scalar form of ecef_delta_to_enu_vec(): (east_m, north_m, up_m) as floats."""
     delta = _scalar_vector("delta_m", delta_m)
     lat = _scalar_angle("lat_deg", lat_deg)
-    lon = _scalar_angle("lon_deg", lon_deg)
+    lon = _scalar_longitude("lon_deg", lon_deg)
     east, north, up = ecef_delta_to_enu_vec(delta, lat, lon)
     return float(east), float(north), float(up)
 
@@ -621,7 +671,7 @@ def look_angles_ecef_vec(sat_m, ground_m, lat_deg, lon_deg) -> tuple[np.ndarray,
     sat = _cartesian("sat_m", sat_m)
     ground = _cartesian("ground_m", ground_m)
     lat = _real_array("lat_deg", lat_deg)
-    lon = _real_array("lon_deg", lon_deg)
+    lon = _longitude_array("lon_deg", lon_deg)
     shape = _broadcast_shape(
         sat_m=sat.shape[:-1], ground_m=ground.shape[:-1], lat_deg=lat.shape, lon_deg=lon.shape
     )
@@ -650,7 +700,7 @@ def look_angles_ecef(sat_m, ground_m, lat_deg, lon_deg) -> tuple[float, float, f
     sat = _scalar_vector("sat_m", sat_m)
     ground = _scalar_vector("ground_m", ground_m)
     lat = _scalar_angle("lat_deg", lat_deg)
-    lon = _scalar_angle("lon_deg", lon_deg)
+    lon = _scalar_longitude("lon_deg", lon_deg)
     range_m, elevation, azimuth = look_angles_ecef_vec(sat, ground, lat, lon)
     return float(range_m), float(elevation), float(azimuth)
 
